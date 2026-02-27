@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -18,13 +19,24 @@ use webrtc::peer_connection::RTCPeerConnection;
 
 use wail_core::protocol::SyncMessage;
 
-/// A single WebRTC peer connection with a DataChannel for sync messages.
+/// A single WebRTC peer connection with DataChannels for sync and audio.
+///
+/// Two DataChannels:
+/// - "sync": JSON-serialized SyncMessage (text mode, low bandwidth)
+/// - "audio": Binary AudioWire frames (binary mode, high bandwidth)
 pub struct PeerConnection {
     pub remote_peer_id: String,
     pc: Arc<RTCPeerConnection>,
-    dc: Option<Arc<RTCDataChannel>>,
+    /// "sync" DataChannel for JSON sync messages
+    dc_sync: Option<Arc<RTCDataChannel>>,
+    /// "audio" DataChannel for binary interval audio
+    dc_audio: Option<Arc<RTCDataChannel>>,
+    /// Incoming sync messages (JSON)
     pub incoming_rx: mpsc::UnboundedReceiver<SyncMessage>,
     incoming_tx: mpsc::UnboundedSender<SyncMessage>,
+    /// Incoming audio data (binary)
+    pub audio_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    audio_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// ICE candidates that arrived before remote description was set
     pending_candidates: Vec<RTCIceCandidateInit>,
     remote_desc_set: bool,
@@ -53,6 +65,7 @@ impl PeerConnection {
 
         let pc = Arc::new(api.new_peer_connection(config).await?);
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let (audio_tx, audio_rx) = mpsc::unbounded_channel();
 
         // Monitor connection state
         let rpid = remote_peer_id.clone();
@@ -64,9 +77,12 @@ impl PeerConnection {
         Ok(Self {
             remote_peer_id,
             pc,
-            dc: None,
+            dc_sync: None,
+            dc_audio: None,
             incoming_rx,
             incoming_tx,
+            audio_rx,
+            audio_tx,
             pending_candidates: Vec::new(),
             remote_desc_set: false,
         })
@@ -74,9 +90,12 @@ impl PeerConnection {
 
     /// Create an SDP offer (we are the initiator).
     pub async fn create_offer(&mut self) -> Result<(String, mpsc::UnboundedReceiver<RTCIceCandidate>)> {
-        // Create the data channel before creating the offer
-        let dc = self.pc.create_data_channel("sync", None).await?;
-        self.setup_data_channel(dc).await;
+        // Create both data channels before creating the offer
+        let dc_sync = self.pc.create_data_channel("sync", None).await?;
+        self.setup_sync_channel(dc_sync).await;
+
+        let dc_audio = self.pc.create_data_channel("audio", None).await?;
+        self.setup_audio_channel(dc_audio).await;
 
         let (ice_tx, ice_rx) = mpsc::unbounded_channel();
         self.pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
@@ -97,25 +116,46 @@ impl PeerConnection {
 
     /// Handle an incoming SDP offer (we are the responder) and return our answer.
     pub async fn handle_offer(&mut self, sdp: String) -> Result<(String, mpsc::UnboundedReceiver<RTCIceCandidate>)> {
-        // Set up handler for incoming data channel
+        // Set up handler for incoming data channels (both sync and audio)
         let incoming_tx = self.incoming_tx.clone();
+        let audio_tx = self.audio_tx.clone();
         let rpid = self.remote_peer_id.clone();
+
         self.pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let incoming_tx = incoming_tx.clone();
+            let audio_tx = audio_tx.clone();
             let rpid = rpid.clone();
             Box::pin(async move {
-                info!(peer = %rpid, label = %dc.label(), "Data channel opened by remote");
-                let tx = incoming_tx.clone();
-                dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                    let tx = tx.clone();
-                    Box::pin(async move {
-                        if let Ok(text) = String::from_utf8(msg.data.to_vec()) {
-                            if let Ok(sync_msg) = serde_json::from_str::<SyncMessage>(&text) {
-                                let _ = tx.send(sync_msg);
-                            }
-                        }
-                    })
-                }));
+                let label = dc.label().to_string();
+                info!(peer = %rpid, label = %label, "Data channel opened by remote");
+
+                match label.as_str() {
+                    "sync" => {
+                        let tx = incoming_tx.clone();
+                        dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                            let tx = tx.clone();
+                            Box::pin(async move {
+                                if let Ok(text) = String::from_utf8(msg.data.to_vec()) {
+                                    if let Ok(sync_msg) = serde_json::from_str::<SyncMessage>(&text) {
+                                        let _ = tx.send(sync_msg);
+                                    }
+                                }
+                            })
+                        }));
+                    }
+                    "audio" => {
+                        let tx = audio_tx.clone();
+                        dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                            let tx = tx.clone();
+                            Box::pin(async move {
+                                let _ = tx.send(msg.data.to_vec());
+                            })
+                        }));
+                    }
+                    other => {
+                        debug!(peer = %rpid, label = %other, "Ignoring unknown data channel");
+                    }
+                }
             })
         }));
 
@@ -177,23 +217,31 @@ impl PeerConnection {
         Ok(())
     }
 
-    /// Send a sync message over the DataChannel.
+    /// Send a sync message over the "sync" DataChannel (JSON text).
     pub async fn send(&self, msg: &SyncMessage) -> Result<()> {
-        if let Some(dc) = &self.dc {
+        if let Some(dc) = &self.dc_sync {
             let text = serde_json::to_string(msg)?;
             dc.send_text(text).await?;
         }
         Ok(())
     }
 
-    /// Set up message handling on a data channel.
-    async fn setup_data_channel(&mut self, dc: Arc<RTCDataChannel>) {
+    /// Send binary audio data over the "audio" DataChannel.
+    pub async fn send_audio(&self, data: &[u8]) -> Result<()> {
+        if let Some(dc) = &self.dc_audio {
+            dc.send(&Bytes::copy_from_slice(data)).await?;
+        }
+        Ok(())
+    }
+
+    /// Set up message handling on the "sync" data channel.
+    async fn setup_sync_channel(&mut self, dc: Arc<RTCDataChannel>) {
         let incoming_tx = self.incoming_tx.clone();
         let rpid = self.remote_peer_id.clone();
 
         let dc_clone = dc.clone();
         dc.on_open(Box::new(move || {
-            info!(peer = %rpid, label = %dc_clone.label(), "Data channel open");
+            info!(peer = %rpid, label = %dc_clone.label(), "Sync channel open");
             Box::pin(async {})
         }));
 
@@ -214,7 +262,29 @@ impl PeerConnection {
             })
         }));
 
-        self.dc = Some(dc);
+        self.dc_sync = Some(dc);
+    }
+
+    /// Set up message handling on the "audio" data channel.
+    async fn setup_audio_channel(&mut self, dc: Arc<RTCDataChannel>) {
+        let audio_tx = self.audio_tx.clone();
+        let rpid = self.remote_peer_id.clone();
+
+        let dc_clone = dc.clone();
+        dc.on_open(Box::new(move || {
+            info!(peer = %rpid, label = %dc_clone.label(), "Audio channel open");
+            Box::pin(async {})
+        }));
+
+        let tx = audio_tx.clone();
+        dc.on_message(Box::new(move |msg: DataChannelMessage| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(msg.data.to_vec());
+            })
+        }));
+
+        self.dc_audio = Some(dc);
     }
 
     pub async fn close(&self) -> Result<()> {

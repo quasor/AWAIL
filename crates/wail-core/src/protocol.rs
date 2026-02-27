@@ -38,6 +38,24 @@ pub enum SyncMessage {
     Hello {
         peer_id: String,
     },
+    /// Announce audio capabilities (sent after Hello)
+    AudioCapabilities {
+        /// Supported sample rates (e.g., [48000])
+        sample_rates: Vec<u32>,
+        /// Supported channel counts (e.g., [1, 2])
+        channel_counts: Vec<u16>,
+        /// Whether this peer wants to send audio
+        can_send: bool,
+        /// Whether this peer wants to receive audio
+        can_receive: bool,
+    },
+    /// Audio interval metadata (sent on the sync channel right before binary audio)
+    AudioIntervalReady {
+        /// Interval index
+        interval_index: i64,
+        /// Size of the upcoming binary audio message in bytes
+        wire_size: u32,
+    },
 }
 
 /// Messages exchanged over the WebSocket signaling channel.

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 wail-core = { path = "../wail-core" }
 wail-net = { path = "../wail-net" }
+wail-audio = { path = "../wail-audio" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -13,32 +13,43 @@ use peer::PeerConnection;
 use signaling::SignalingClient;
 
 /// Manages WebRTC connections to all peers in a room.
+///
+/// Provides two message streams:
+/// - Sync messages (JSON, low bandwidth): tempo, beat, phase, clock sync
+/// - Audio messages (binary, high bandwidth): Opus-encoded interval audio
 pub struct PeerMesh {
     peer_id: String,
     peers: HashMap<String, PeerConnection>,
     signaling: SignalingClient,
     sync_tx: mpsc::UnboundedSender<(String, SyncMessage)>,
+    audio_tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
 }
 
 impl PeerMesh {
     /// Connect to signaling server and join a room.
-    /// Returns the mesh and a receiver for incoming sync messages from all peers.
+    /// Returns the mesh plus receivers for sync messages and audio data.
     pub async fn connect(
         server_url: &str,
         room: &str,
         peer_id: &str,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<(String, SyncMessage)>)> {
+    ) -> Result<(
+        Self,
+        mpsc::UnboundedReceiver<(String, SyncMessage)>,
+        mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+    )> {
         let signaling = SignalingClient::connect(server_url, room, peer_id).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
+        let (audio_tx, audio_rx) = mpsc::unbounded_channel();
 
         let mesh = Self {
             peer_id: peer_id.to_string(),
             peers: HashMap::new(),
             signaling,
             sync_tx,
+            audio_tx,
         };
 
-        Ok((mesh, sync_rx))
+        Ok((mesh, sync_rx, audio_rx))
     }
 
     /// Broadcast a sync message to all connected peers.
@@ -54,6 +65,23 @@ impl PeerMesh {
     pub async fn send_to(&self, peer_id: &str, msg: &SyncMessage) -> Result<()> {
         if let Some(pc) = self.peers.get(peer_id) {
             pc.send(msg).await?;
+        }
+        Ok(())
+    }
+
+    /// Broadcast binary audio data to all connected peers.
+    pub async fn broadcast_audio(&self, data: &[u8]) {
+        for (pid, pc) in &self.peers {
+            if let Err(e) = pc.send_audio(data).await {
+                warn!(peer = %pid, error = %e, "Failed to send audio to peer");
+            }
+        }
+    }
+
+    /// Send binary audio data to a specific peer.
+    pub async fn send_audio_to(&self, peer_id: &str, data: &[u8]) -> Result<()> {
+        if let Some(pc) = self.peers.get(peer_id) {
+            pc.send_audio(data).await?;
         }
         Ok(())
     }
@@ -110,8 +138,9 @@ impl PeerMesh {
                         // Spawn ICE candidate sender
                         self.spawn_ice_sender(from.clone(), ice_rx);
 
-                        // Spawn message reader
+                        // Spawn message readers (sync + audio)
                         self.spawn_message_reader(&from, &mut pc);
+                        self.spawn_audio_reader(&from, &mut pc);
 
                         self.peers.insert(from, pc);
                     }
@@ -157,8 +186,9 @@ impl PeerMesh {
         // Spawn ICE candidate sender
         self.spawn_ice_sender(remote_id.to_string(), ice_rx);
 
-        // Spawn message reader
+        // Spawn message readers (sync + audio)
         self.spawn_message_reader(remote_id, &mut pc);
+        self.spawn_audio_reader(remote_id, &mut pc);
 
         self.peers.insert(remote_id.to_string(), pc);
         Ok(())
@@ -206,6 +236,23 @@ impl PeerMesh {
         tokio::spawn(async move {
             while let Some(msg) = old_rx.recv().await {
                 if sync_tx.send((rid.clone(), msg)).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Spawn a task that reads audio data from a peer and forwards to the unified audio channel.
+    fn spawn_audio_reader(&self, remote_id: &str, pc: &mut PeerConnection) {
+        let audio_tx = self.audio_tx.clone();
+        let rid = remote_id.to_string();
+
+        let (_new_tx, new_rx) = mpsc::unbounded_channel();
+        let mut old_rx = std::mem::replace(&mut pc.audio_rx, new_rx);
+
+        tokio::spawn(async move {
+            while let Some(data) = old_rx.recv().await {
+                if audio_tx.send((rid.clone(), data)).is_err() {
                     break;
                 }
             }

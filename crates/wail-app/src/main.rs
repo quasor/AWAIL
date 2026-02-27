@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{error, info, warn};
 
+use wail_audio::AudioWire;
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
@@ -75,18 +76,24 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
     link.enable();
     let (link_cmd_tx, mut link_event_rx) = link.spawn_poller();
 
-    // Connect to signaling server
-    let (mut mesh, mut sync_rx) = PeerMesh::connect(&server, &room, &peer_id).await?;
+    // Connect to signaling server (now returns sync + audio receivers)
+    let (mut mesh, mut sync_rx, mut audio_rx) =
+        PeerMesh::connect(&server, &room, &peer_id).await?;
     info!("Connected to signaling server");
 
     // Clock sync and interval tracker
     let mut clock = ClockSync::new();
     let mut interval = IntervalTracker::new(bars, quantum);
-    let mut ping_interval = tokio::time::interval(Duration::from_millis(ClockSync::ping_interval_ms()));
+    let mut ping_interval =
+        tokio::time::interval(Duration::from_millis(ClockSync::ping_interval_ms()));
     let mut status_interval = tokio::time::interval(Duration::from_secs(5));
 
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
+
+    // Audio interval stats
+    let mut audio_intervals_sent: u64 = 0;
+    let mut audio_intervals_received: u64 = 0;
 
     info!("WAIL peer running. Waiting for peers...");
 
@@ -103,6 +110,15 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
                         // Send interval config
                         let config = SyncMessage::IntervalConfig { bars, quantum };
                         mesh.broadcast(&config).await;
+
+                        // Announce audio capabilities
+                        let caps = SyncMessage::AudioCapabilities {
+                            sample_rates: vec![48000],
+                            channel_counts: vec![1, 2],
+                            can_send: true,
+                            can_receive: true,
+                        };
+                        mesh.broadcast(&caps).await;
                     }
                     Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) => {
                         info!(peer = %pid, "Peer disconnected");
@@ -160,6 +176,49 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
                     SyncMessage::IntervalConfig { bars: remote_bars, quantum: remote_q } => {
                         info!(bars = remote_bars, quantum = remote_q, "Remote interval config");
                         interval.set_config(remote_bars, remote_q);
+                    }
+
+                    SyncMessage::AudioCapabilities { sample_rates, channel_counts, can_send, can_receive } => {
+                        info!(
+                            peer = %from,
+                            ?sample_rates,
+                            ?channel_counts,
+                            can_send,
+                            can_receive,
+                            "Remote audio capabilities"
+                        );
+                    }
+
+                    SyncMessage::AudioIntervalReady { interval_index, wire_size } => {
+                        tracing::debug!(
+                            peer = %from,
+                            interval = interval_index,
+                            size = wire_size,
+                            "Audio interval incoming"
+                        );
+                    }
+                }
+            }
+
+            // --- Incoming audio data from peers (binary DataChannel) ---
+            Some((from, data)) = audio_rx.recv() => {
+                match AudioWire::decode(&data) {
+                    Ok(audio_interval) => {
+                        audio_intervals_received += 1;
+                        info!(
+                            peer = %from,
+                            interval = audio_interval.index,
+                            sample_rate = audio_interval.sample_rate,
+                            channels = audio_interval.channels,
+                            frames = audio_interval.num_frames,
+                            opus_bytes = audio_interval.opus_data.len(),
+                            bpm = format!("{:.1}", audio_interval.bpm),
+                            "Received audio interval"
+                        );
+                        // TODO: Forward to local plugin via IPC for playback
+                    }
+                    Err(e) => {
+                        warn!(peer = %from, error = %e, "Failed to decode audio wire data");
                     }
                 }
             }
@@ -233,6 +292,8 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
                         webrtc_peers = peers.len(),
                         rtts = ?peer_rtts,
                         interval_bars = interval.bars(),
+                        audio_sent = audio_intervals_sent,
+                        audio_recv = audio_intervals_received,
                         "Status"
                     );
                 }
