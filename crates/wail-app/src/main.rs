@@ -115,7 +115,7 @@ async fn run_peer(
 
     // IPC state: writer to send remote audio to plugin, reader channel for incoming from plugin
     let mut ipc_writer: Option<tokio::net::tcp::OwnedWriteHalf> = None;
-    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
 
     info!("WAIL peer running. Waiting for peers...");
 
@@ -144,8 +144,12 @@ async fn run_peer(
                                     Ok(n) => {
                                         recv_buf.push(&buf[..n]);
                                         while let Some(frame) = recv_buf.next_frame() {
-                                            if tx.send(frame).is_err() {
-                                                return;
+                                            match tx.try_send(frame) {
+                                                Ok(()) => {}
+                                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                                    debug!("IPC audio channel full — dropping frame");
+                                                }
+                                                Err(mpsc::error::TrySendError::Closed(_)) => return,
                                             }
                                         }
                                     }

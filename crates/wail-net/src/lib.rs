@@ -22,7 +22,7 @@ pub struct PeerMesh {
     peers: HashMap<String, PeerConnection>,
     signaling: SignalingClient,
     sync_tx: mpsc::UnboundedSender<(String, SyncMessage)>,
-    audio_tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
+    audio_tx: mpsc::Sender<(String, Vec<u8>)>,
 }
 
 impl PeerMesh {
@@ -35,11 +35,11 @@ impl PeerMesh {
     ) -> Result<(
         Self,
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
-        mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+        mpsc::Receiver<(String, Vec<u8>)>,
     )> {
         let signaling = SignalingClient::connect(server_url, room, peer_id).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
-        let (audio_tx, audio_rx) = mpsc::unbounded_channel();
+        let (audio_tx, audio_rx) = mpsc::channel(64);
 
         let mesh = Self {
             peer_id: peer_id.to_string(),
@@ -258,8 +258,12 @@ impl PeerMesh {
 
         tokio::spawn(async move {
             while let Some(data) = rx.recv().await {
-                if audio_tx.send((rid.clone(), data)).is_err() {
-                    break;
+                match audio_tx.try_send((rid.clone(), data)) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        debug!(peer = %rid, "Mesh audio channel full — dropping frame");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
         });

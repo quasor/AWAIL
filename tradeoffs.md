@@ -26,16 +26,17 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 | I3 | Magic number `10` for snapshot interval → `SNAPSHOT_INTERVAL_TICKS` constant | 67a02c2 |
 | W1 | Duplicate AudioBridge → deleted old bridge, plugin uses `wail_audio::AudioBridge` | 085a16e |
 | W14 | Audio IPC not wired → TCP IPC between plugin and app, bidirectional audio intervals | 085a16e |
+| W6 | Unbounded audio channels → bounded(64) with drop-on-full for 3 audio channels; sync/signaling/ICE left unbounded | pending |
 
 ---
 
 ## Deferred — Infrastructure (revisit when deploying)
 
-### W6. Unbounded channels everywhere (12 instances)
-**Status:** Deferred — infrastructure concern
-**Files:** `crates/wail-net/src/signaling.rs:33-34`, `crates/wail-net/src/lib.rs:41-42`, `crates/wail-net/src/peer.rs:67-68,100,162`, `crates/wail-core/src/link.rs:120-121`
-**Problem:** All channels are `mpsc::unbounded_channel()`. A slow consumer causes unbounded memory growth.
-**Decision:** Leave as-is until memory issues are observed. Messages are small, peers are few. Would matter at scale or with bad network.
+### W6. Unbounded channels (sync/signaling/ICE — 6 remaining instances)
+**Status:** Partially fixed — audio channels bounded, sync/signaling left unbounded
+**Files:** `crates/wail-net/src/signaling.rs:33-34`, `crates/wail-net/src/peer.rs:67,100,162`, `crates/wail-core/src/link.rs:120-121`
+**Problem:** Remaining sync/signaling channels are unbounded. Messages are tiny JSON structs at low frequency.
+**Decision:** Low risk — leave until scale demands it. Audio channels (the real risk) are now bounded(64) with `try_send` + drop-on-full.
 
 ### W10. No graceful shutdown
 **Status:** Deferred — infrastructure concern

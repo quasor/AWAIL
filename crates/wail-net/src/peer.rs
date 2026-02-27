@@ -34,9 +34,9 @@ pub struct PeerConnection {
     /// Incoming sync messages (JSON) — taken via `take_sync_rx()` for forwarding
     pub incoming_rx: Option<mpsc::UnboundedReceiver<SyncMessage>>,
     incoming_tx: mpsc::UnboundedSender<SyncMessage>,
-    /// Incoming audio data (binary) — taken via `take_audio_rx()` for forwarding
-    pub audio_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
-    audio_tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// Incoming audio data (binary, bounded) — taken via `take_audio_rx()` for forwarding
+    pub audio_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    audio_tx: mpsc::Sender<Vec<u8>>,
     /// ICE candidates that arrived before remote description was set
     pending_candidates: Vec<RTCIceCandidateInit>,
     remote_desc_set: bool,
@@ -65,7 +65,7 @@ impl PeerConnection {
 
         let pc = Arc::new(api.new_peer_connection(config).await?);
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let (audio_tx, audio_rx) = mpsc::unbounded_channel();
+        let (audio_tx, audio_rx) = mpsc::channel(64);
 
         // Monitor connection state
         let rpid = remote_peer_id.clone();
@@ -148,7 +148,9 @@ impl PeerConnection {
                         dc.on_message(Box::new(move |msg: DataChannelMessage| {
                             let tx = tx.clone();
                             Box::pin(async move {
-                                let _ = tx.send(msg.data.to_vec());
+                                if tx.try_send(msg.data.to_vec()).is_err() {
+                                    debug!("Audio channel full — dropping frame");
+                                }
                             })
                         }));
                     }
@@ -290,7 +292,9 @@ impl PeerConnection {
         dc.on_message(Box::new(move |msg: DataChannelMessage| {
             let tx = tx.clone();
             Box::pin(async move {
-                let _ = tx.send(msg.data.to_vec());
+                if tx.try_send(msg.data.to_vec()).is_err() {
+                    debug!("Audio channel full — dropping frame");
+                }
             })
         }));
 
@@ -305,7 +309,7 @@ impl PeerConnection {
 
     /// Take the audio data receiver for forwarding to a unified channel.
     /// Can only be called once — returns None on subsequent calls.
-    pub fn take_audio_rx(&mut self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
+    pub fn take_audio_rx(&mut self) -> Option<mpsc::Receiver<Vec<u8>>> {
         self.audio_rx.take()
     }
 
