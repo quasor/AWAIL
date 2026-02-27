@@ -61,10 +61,10 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 ## Deferred — Feature Work
 
 ### W15. Clock offset computed but never applied
-**Status:** Feature work, not a fix
+**Status:** Won't fix — clock domain mismatch
 **File:** `crates/wail-app/src/main.rs:150-153`
 **Problem:** Clock sync computes per-peer offset but never uses it to adjust beat timestamps.
-**Scope:** Apply `clock.remote_to_local()` when processing remote sync messages.
+**Rationale:** Link timestamps (`link.clock_micros()`) and ClockSync timestamps (`Instant::now()`) are different clock domains. Applying ClockSync offsets to Link timestamps would be incorrect. ClockSync RTT remains useful for diagnostics (displaying latency to peers). Interval boundaries are computed independently per peer from local beat position — this is intentional for NINJAM semantics where drift up to 1 interval is tolerable.
 
 ---
 

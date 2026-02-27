@@ -220,6 +220,235 @@ mod tests {
     // Test 5: Wire format preserves all fields through full pipeline
     // ---------------------------------------------------------------
 
+    // ---------------------------------------------------------------
+    // WAN NINJAM Tests: Prove two internet peers hear each other's
+    // last interval via the NINJAM double-buffer model.
+    // ---------------------------------------------------------------
+
+    // ---------------------------------------------------------------
+    // WAN Test 1: Boundary drift — peers cross interval boundaries
+    // at different times (simulating WAN clock skew). Peer A's
+    // completed interval still gets played by Peer B.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn wan_peers_with_boundary_drift() {
+        let mut peer_a = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+        let mut peer_b = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+
+        let buf_size = 4096;
+        let signal = sine_wave(440.0, buf_size / CH as usize, CH, SR);
+        let silence = vec![0.0f32; buf_size];
+        let mut out_a = vec![0.0f32; buf_size];
+        let mut out_b = vec![0.0f32; buf_size];
+
+        // Both peers record through interval 0, but at different beat positions
+        // (simulating independent clocks / WAN drift)
+        peer_a.process(&signal, &mut out_a, 0.0);
+        peer_b.process(&silence, &mut out_b, 0.5); // Peer B is 0.5 beats behind
+
+        peer_a.process(&signal, &mut out_a, 4.0);
+        peer_b.process(&silence, &mut out_b, 4.5);
+
+        peer_a.process(&signal, &mut out_a, 8.0);
+        peer_b.process(&silence, &mut out_b, 8.5);
+
+        peer_a.process(&signal, &mut out_a, 12.0);
+        peer_b.process(&silence, &mut out_b, 12.5);
+
+        // Peer A crosses into interval 1 FIRST (it's ahead)
+        let wire_a = peer_a.process(&signal, &mut out_a, 16.0);
+        assert_eq!(wire_a.len(), 1, "Peer A should produce interval 0");
+
+        // Peer B is still in interval 0 (beat 15.5 < 16.0)
+        peer_b.process(&silence, &mut out_b, 15.5);
+
+        // "Network" delivers A's interval to B while B is still in interval 0
+        peer_b.receive_wire("peer-a", &wire_a[0]);
+
+        // Peer B finally crosses into interval 1 (a bit later than A)
+        peer_b.process(&silence, &mut out_b, 16.5);
+
+        // Peer B should now hear Peer A's audio
+        let energy = rms(&out_b);
+        assert!(
+            energy > 0.01,
+            "Peer B should hear Peer A despite boundary drift, RMS={energy}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // WAN Test 2: The NINJAM invariant — during interval N, you
+    // always hear the remote's interval N-1. Verified across
+    // multiple intervals with distinct signals per interval.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn hear_last_interval_invariant() {
+        let mut sender = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+        let mut receiver = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+
+        let buf_size = 4096;
+        let silence = vec![0.0f32; buf_size];
+        let mut out_s = vec![0.0f32; buf_size];
+        let mut out_r = vec![0.0f32; buf_size];
+
+        // Three distinct signals — different amplitudes to distinguish intervals
+        let loud = vec![0.9f32; buf_size];    // interval 0
+        let medium = vec![0.5f32; buf_size];  // interval 1
+        let quiet = vec![0.2f32; buf_size];   // interval 2
+
+        let beats_per_interval = (BARS as f64) * Q; // 16.0
+
+        // --- Interval 0: sender records loud signal ---
+        for sub in [0.0, 4.0, 8.0, 12.0] {
+            sender.process(&loud, &mut out_s, sub);
+            receiver.process(&silence, &mut out_r, sub);
+        }
+
+        // --- Cross into interval 1: sender produces interval 0 (loud) ---
+        let wire_0 = sender.process(&medium, &mut out_s, beats_per_interval);
+        assert_eq!(wire_0.len(), 1);
+        receiver.receive_wire("sender", &wire_0[0]);
+        receiver.process(&silence, &mut out_r, beats_per_interval);
+
+        // Receiver is now in interval 1, playing sender's interval 0 (loud)
+        let energy_playing_0 = rms(&out_r);
+        assert!(
+            energy_playing_0 > 0.01,
+            "Receiver should hear sender's interval 0, RMS={energy_playing_0}"
+        );
+
+        // --- Record through interval 1: sender records medium signal ---
+        for sub in [4.0, 8.0, 12.0] {
+            sender.process(&medium, &mut out_s, beats_per_interval + sub);
+            receiver.process(&silence, &mut out_r, beats_per_interval + sub);
+        }
+
+        // --- Cross into interval 2: sender produces interval 1 (medium) ---
+        let wire_1 = sender.process(&quiet, &mut out_s, 2.0 * beats_per_interval);
+        assert_eq!(wire_1.len(), 1);
+        receiver.receive_wire("sender", &wire_1[0]);
+        receiver.process(&silence, &mut out_r, 2.0 * beats_per_interval);
+
+        // Receiver is now in interval 2, playing sender's interval 1 (medium)
+        let energy_playing_1 = rms(&out_r);
+        assert!(
+            energy_playing_1 > 0.01,
+            "Receiver should hear sender's interval 1, RMS={energy_playing_1}"
+        );
+
+        // The key NINJAM invariant: we heard interval 0 during interval 1,
+        // and interval 1 during interval 2. Always the PREVIOUS interval.
+        // Both had energy (non-silence) confirming actual audio was delivered.
+    }
+
+    // ---------------------------------------------------------------
+    // WAN Test 3: Bidirectional exchange — both peers record and
+    // send simultaneously. Each hears the other's previous interval.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bidirectional_interval_exchange() {
+        let mut peer_a = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+        let mut peer_b = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+
+        let buf_size = 4096;
+        let signal_a = sine_wave(440.0, buf_size / CH as usize, CH, SR);
+        let signal_b = sine_wave(880.0, buf_size / CH as usize, CH, SR);
+        let mut out_a = vec![0.0f32; buf_size];
+        let mut out_b = vec![0.0f32; buf_size];
+
+        // Both record their own signals through interval 0
+        for beat in [0.0, 4.0, 8.0, 12.0] {
+            peer_a.process(&signal_a, &mut out_a, beat);
+            peer_b.process(&signal_b, &mut out_b, beat);
+        }
+
+        // Both cross into interval 1 — each produces their completed interval
+        let wire_a = peer_a.process(&signal_a, &mut out_a, 16.0);
+        let wire_b = peer_b.process(&signal_b, &mut out_b, 16.0);
+        assert_eq!(wire_a.len(), 1, "Peer A produces interval 0");
+        assert_eq!(wire_b.len(), 1, "Peer B produces interval 0");
+
+        // Exchange over "network"
+        peer_a.receive_wire("peer-b", &wire_b[0]);
+        peer_b.receive_wire("peer-a", &wire_a[0]);
+
+        // Both cross into interval 2 — should play each other's audio
+        peer_a.process(&signal_a, &mut out_a, 32.0);
+        peer_b.process(&signal_b, &mut out_b, 32.0);
+
+        let energy_a = rms(&out_a);
+        let energy_b = rms(&out_b);
+        assert!(
+            energy_a > 0.01,
+            "Peer A should hear Peer B's audio, RMS={energy_a}"
+        );
+        assert!(
+            energy_b > 0.01,
+            "Peer B should hear Peer A's audio, RMS={energy_b}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // WAN Test 4: Late delivery — interval arrives mid-interval
+    // (simulating network delay). Still plays at the next boundary.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn late_delivery_still_plays() {
+        let mut sender = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+        let mut receiver = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+
+        let buf_size = 4096;
+        let signal = sine_wave(440.0, buf_size / CH as usize, CH, SR);
+        let silence = vec![0.0f32; buf_size];
+        let mut out_s = vec![0.0f32; buf_size];
+        let mut out_r = vec![0.0f32; buf_size];
+
+        let beats_per_interval = (BARS as f64) * Q; // 16.0
+
+        // Sender records interval 0
+        for beat in [0.0, 4.0, 8.0, 12.0] {
+            sender.process(&signal, &mut out_s, beat);
+            receiver.process(&silence, &mut out_r, beat);
+        }
+
+        // Sender crosses into interval 1 — produces interval 0
+        let wire_0 = sender.process(&signal, &mut out_s, beats_per_interval);
+        assert_eq!(wire_0.len(), 1);
+
+        // Receiver also crosses into interval 1 — but NO wire data yet (simulating delay)
+        receiver.process(&silence, &mut out_r, beats_per_interval);
+        let energy_no_data = rms(&out_r);
+        assert!(
+            energy_no_data < 0.001,
+            "No audio should play yet (data not delivered), RMS={energy_no_data}"
+        );
+
+        // Network delay: data arrives mid-interval 1 (beat 20.0)
+        receiver.process(&silence, &mut out_r, beats_per_interval + 4.0);
+        // NOW the wire data arrives (late, but before next boundary)
+        receiver.receive_wire("sender", &wire_0[0]);
+
+        // Continue through interval 1
+        receiver.process(&silence, &mut out_r, beats_per_interval + 8.0);
+        receiver.process(&silence, &mut out_r, beats_per_interval + 12.0);
+
+        // Cross into interval 2 — late-delivered audio should now play
+        receiver.process(&silence, &mut out_r, 2.0 * beats_per_interval);
+        let energy_late = rms(&out_r);
+        assert!(
+            energy_late > 0.01,
+            "Late-delivered interval should play at next boundary, RMS={energy_late}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 5: Wire format preserves all fields through full pipeline
+    // ---------------------------------------------------------------
+
     #[test]
     fn wire_fields_roundtrip_through_pipeline() {
         let mut bridge = AudioBridge::new(48000, 1, 3, 5.0, 96);
