@@ -41,7 +41,13 @@ fn make_audio_handler(
                 let total_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
                 let payload = &data[CHUNK_HEADER_SIZE..];
 
-                let mut guard = reassembly.lock().unwrap();
+                let mut guard = match reassembly.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        debug!("Audio reassembly mutex poisoned, resetting");
+                        e.into_inner()
+                    }
+                };
                 let state = guard.get_or_insert_with(|| AudioReassembly {
                     buffer: Vec::with_capacity(total_len),
                     expected_len: total_len,
