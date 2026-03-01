@@ -116,16 +116,17 @@ jobs:
         run: cargo tauri build -c crates/wail-tauri/tauri.conf.json
 
       - name: Collect artifacts
+        shell: pwsh
         run: |
-          mkdir dist
-          copy target\release\wail-app.exe dist\
-          copy C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
-          xcopy /E /I target\bundled\wail-plugin.clap dist\wail-plugin.clap\
-          xcopy /E /I target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3\
-          copy C:\vcpkg\installed\x64-windows\bin\opus.dll dist\wail-plugin.vst3\Contents\x86_64-win\
-          copy C:\vcpkg\installed\x64-windows\bin\opus.dll dist\wail-plugin.clap\
-          xcopy /E /I target\release\bundle\nsis dist\nsis\
-          xcopy /E /I target\release\bundle\msi dist\msi\
+          New-Item -ItemType Directory -Force dist
+          Copy-Item target\release\wail-app.exe dist\
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
+          Copy-Item -Recurse target\bundled\wail-plugin.clap dist\wail-plugin.clap
+          Copy-Item -Recurse target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\wail-plugin.vst3\Contents\x86_64-win\
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\wail-plugin.clap\
+          if (Test-Path target\release\bundle\nsis) { Copy-Item -Recurse target\release\bundle\nsis dist\nsis }
+          if (Test-Path target\release\bundle\msi) { Copy-Item -Recurse target\release\bundle\msi dist\msi }
 
       - uses: actions/upload-artifact@v4
         with:
