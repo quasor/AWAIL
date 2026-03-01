@@ -83,7 +83,6 @@ function showSession(room, bpm) {
   document.getElementById('session-plugin').textContent = 'disconnected';
   document.getElementById('session-plugin').className = '';
   document.getElementById('session-link-peers').textContent = '0';
-  document.getElementById('session-position').textContent = '-';
   document.getElementById('session-interval').textContent = '-';
   testToneEnabled = document.getElementById('test-tone').checked;
   updateTestToneUI();
@@ -189,10 +188,6 @@ async function setupListeners() {
     if (document.activeElement !== bpmInput) {
       bpmInput.value = s.bpm.toFixed(1);
     }
-    const quantum = s.interval_bars > 0 ? 4 : 4; // beats per bar
-    const bar = Math.floor(s.beat / quantum) + 1;
-    const beatInBar = Math.floor(s.phase) + 1;
-    document.getElementById('session-position').textContent = `Bar ${bar} · Beat ${beatInBar}`;
     document.getElementById('session-link-peers').textContent = s.link_peers;
     document.getElementById('session-audio').textContent =
       `${s.audio_sent} sent / ${s.audio_recv} recv`;
