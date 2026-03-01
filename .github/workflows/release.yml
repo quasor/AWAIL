@@ -31,13 +31,19 @@ jobs:
         run: brew install opus
 
       - name: Install cargo-binstall
-        run: which cargo-binstall || cargo install cargo-binstall
+        run: which cargo-binstall || curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
 
       - name: Install cargo-nih-plug
-        run: which cargo-nih-plug || cargo binstall cargo-nih-plug -y --no-confirm || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
+        run: which cargo-nih-plug || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 
       - name: Install tauri-cli
-        run: which cargo-tauri || cargo binstall tauri-cli -y --no-confirm || cargo install tauri-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          which cargo-tauri && exit 0
+          TAURI_TAG=$(gh api repos/tauri-apps/tauri/releases --jq '[.[] | select(.tag_name | startswith("tauri-cli-v"))][0].tag_name')
+          gh release download "$TAURI_TAG" --repo tauri-apps/tauri --pattern "cargo-tauri-aarch64-apple-darwin.zip" --dir /tmp
+          unzip -o /tmp/cargo-tauri-aarch64-apple-darwin.zip -d ~/.cargo/bin/
 
       - name: Build CLI binary
         run: cargo build -p wail-app --release
@@ -46,7 +52,7 @@ jobs:
         run: cargo xtask build-plugin
 
       - name: Build Tauri app
-        run: cargo tauri build -c crates/wail-tauri/tauri.conf.json
+        run: cargo tauri build
 
       - name: Collect artifacts
         run: |
@@ -97,23 +103,25 @@ jobs:
       - name: Install cargo-binstall
         run: |
           if (!(Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
-            cargo install cargo-binstall
+            Set-ExecutionPolicy Unrestricted -Scope Process; iex (iwr "https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.ps1").Content
           }
         shell: pwsh
 
       - name: Install cargo-nih-plug
         run: |
           if (!(Get-Command cargo-nih-plug -ErrorAction SilentlyContinue)) {
-            cargo binstall cargo-nih-plug -y --no-confirm
-            if ($LASTEXITCODE -ne 0) { cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug }
+            cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
           }
         shell: pwsh
 
       - name: Install tauri-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if (!(Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
-            cargo binstall tauri-cli -y --no-confirm
-            if ($LASTEXITCODE -ne 0) { cargo install tauri-cli }
+            $tag = (gh api repos/tauri-apps/tauri/releases --jq '[.[] | select(.tag_name | startswith("tauri-cli-v"))][0].tag_name') | Out-String | ForEach-Object { $_.Trim() }
+            gh release download $tag --repo tauri-apps/tauri --pattern "cargo-tauri-x86_64-pc-windows-msvc.zip" --dir $env:TEMP
+            Expand-Archive "$env:TEMP\cargo-tauri-x86_64-pc-windows-msvc.zip" -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
           }
         shell: pwsh
 
@@ -130,7 +138,7 @@ jobs:
       - name: Build Tauri app
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: cargo tauri build -c crates/wail-tauri/tauri.conf.json
+        run: cargo tauri build
 
       - name: Collect artifacts
         shell: pwsh
@@ -138,10 +146,8 @@ jobs:
           New-Item -ItemType Directory -Force dist
           Copy-Item target\release\wail-app.exe dist\
           Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
-          Copy-Item -Recurse target\bundled\wail-plugin.clap dist\wail-plugin.clap
+          Copy-Item target\bundled\wail-plugin.clap dist\
           Copy-Item -Recurse target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3
-          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\wail-plugin.vst3\Contents\x86_64-win\
-          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\wail-plugin.clap\
           if (Test-Path target\release\bundle\nsis\*.exe) { Copy-Item target\release\bundle\nsis\*.exe dist\ }
           if (Test-Path target\release\bundle\msi\*.msi) { Copy-Item target\release\bundle\msi\*.msi dist\ }
 
