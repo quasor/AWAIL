@@ -12,13 +12,15 @@ const sessionError = document.getElementById('session-error');
 const setBpmBtn = document.getElementById('set-bpm-btn');
 const installPluginsBtn = document.getElementById('install-plugins-btn');
 const pluginStatus = document.getElementById('plugin-status');
+const toggleTestToneBtn = document.getElementById('toggle-test-tone-btn');
 
 // State
 let unlisten = [];
+let testToneEnabled = false;
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'display-name', 'bpm', 'server', 'bars', 'quantum', 'ipc-port'];
+const rememberFields = ['room', 'password', 'display-name', 'bpm', 'server', 'bars', 'quantum', 'ipc-port', 'test-tone'];
 
 function loadSettings() {
   try {
@@ -27,7 +29,12 @@ function loadSettings() {
     const settings = JSON.parse(saved);
     for (const id of rememberFields) {
       if (settings[id] != null) {
-        document.getElementById(id).value = settings[id];
+        const el = document.getElementById(id);
+        if (el.type === 'checkbox') {
+          el.checked = settings[id];
+        } else {
+          el.value = settings[id];
+        }
       }
     }
     document.getElementById('remember').checked = true;
@@ -41,7 +48,8 @@ function saveSettings() {
   }
   const settings = {};
   for (const id of rememberFields) {
-    settings[id] = document.getElementById(id).value;
+    const el = document.getElementById(id);
+    settings[id] = el.type === 'checkbox' ? el.checked : el.value;
   }
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 }
@@ -77,6 +85,14 @@ function showSession(room, bpm) {
   document.getElementById('session-link-peers').textContent = '0';
   document.getElementById('session-position').textContent = '-';
   document.getElementById('session-interval').textContent = '-';
+  testToneEnabled = document.getElementById('test-tone').checked;
+  updateTestToneUI();
+}
+
+function updateTestToneUI() {
+  document.getElementById('session-test-tone').textContent = testToneEnabled ? 'ON' : 'OFF';
+  document.getElementById('session-test-tone').className = testToneEnabled ? 'connected' : '';
+  toggleTestToneBtn.textContent = testToneEnabled ? 'Disable' : 'Enable';
 }
 
 function showError(el, msg) {
@@ -105,6 +121,7 @@ joinForm.addEventListener('submit', async (e) => {
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
     ipcPort: parseInt(document.getElementById('ipc-port').value),
+    testTone: document.getElementById('test-tone').checked,
   };
 
   try {
@@ -147,6 +164,18 @@ document.getElementById('session-bpm').addEventListener('keydown', (e) => {
   }
 });
 
+// --- Test Tone Toggle ---
+toggleTestToneBtn.addEventListener('click', async () => {
+  testToneEnabled = !testToneEnabled;
+  try {
+    await invoke('set_test_tone', { enabled: testToneEnabled });
+  } catch (err) {
+    console.error('Test tone toggle error:', err);
+    testToneEnabled = !testToneEnabled; // revert on error
+  }
+  updateTestToneUI();
+});
+
 // --- Event Listeners ---
 async function setupListeners() {
   cleanup();
@@ -169,6 +198,10 @@ async function setupListeners() {
       s.plugin_connected ? 'connected' : 'disconnected';
     document.getElementById('session-plugin').className =
       s.plugin_connected ? 'connected' : '';
+
+    // Sync test tone state
+    testToneEnabled = s.test_tone_enabled;
+    updateTestToneUI();
 
     // Update peer list
     const peerList = document.getElementById('peer-list');

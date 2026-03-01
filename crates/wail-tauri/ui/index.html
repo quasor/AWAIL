@@ -39,6 +39,11 @@
 
           <label for="ipc-port">IPC Port</label>
           <input type="number" id="ipc-port" value="9191" min="1024" max="65535">
+
+          <div class="remember-row" style="margin-top:8px">
+            <input type="checkbox" id="test-tone">
+            <label for="test-tone" class="remember-label">Enable test tone (no plugin needed)</label>
+          </div>
         </div>
       </details>
 
@@ -103,6 +108,14 @@
     <div class="stat-group">
       <label>Plugin</label>
       <span id="session-plugin">disconnected</span>
+    </div>
+
+    <div class="stat-group">
+      <label>Test Tone</label>
+      <div class="test-tone-row">
+        <span id="session-test-tone">OFF</span>
+        <button type="button" id="toggle-test-tone-btn" class="small-btn">Enable</button>
+      </div>
     </div>
 
     <button type="button" id="disconnect-btn">Disconnect</button>

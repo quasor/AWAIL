@@ -29,6 +29,7 @@ pub fn run() {
             commands::join_room,
             commands::disconnect,
             commands::change_bpm,
+            commands::set_test_tone,
             commands::install_plugins,
             commands::check_plugins_installed,
         ])

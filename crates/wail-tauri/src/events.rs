@@ -51,6 +51,7 @@ pub struct StatusUpdate {
     pub audio_sent: u64,
     pub audio_recv: u64,
     pub plugin_connected: bool,
+    pub test_tone_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
