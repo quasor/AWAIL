@@ -37,7 +37,11 @@ jobs:
         run: which cargo-nih-plug || cargo binstall cargo-nih-plug -y --no-confirm || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 
       - name: Install tauri-cli
-        run: which cargo-tauri || cargo binstall tauri-cli -y --no-confirm || cargo install tauri-cli
+        run: |
+          which cargo-tauri && exit 0
+          TAURI_TAG=$(curl -s https://api.github.com/repos/tauri-apps/tauri/releases | python3 -c "import sys,json; print(next(r['tag_name'] for r in json.load(sys.stdin) if r['tag_name'].startswith('tauri-cli-v')))")
+          curl -fsSL "https://github.com/tauri-apps/tauri/releases/download/${TAURI_TAG}/cargo-tauri-aarch64-apple-darwin.zip" -o /tmp/tauri.zip
+          unzip -o /tmp/tauri.zip -d ~/.cargo/bin/
 
       - name: Build CLI binary
         run: cargo build -p wail-app --release
@@ -112,8 +116,9 @@ jobs:
       - name: Install tauri-cli
         run: |
           if (!(Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
-            cargo binstall tauri-cli -y --no-confirm
-            if ($LASTEXITCODE -ne 0) { cargo install tauri-cli }
+            $tag = (Invoke-RestMethod https://api.github.com/repos/tauri-apps/tauri/releases) | Where-Object { $_.tag_name -like 'tauri-cli-v*' } | Select-Object -First 1 -ExpandProperty tag_name
+            Invoke-WebRequest "https://github.com/tauri-apps/tauri/releases/download/$tag/cargo-tauri-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\tauri.zip"
+            Expand-Archive "$env:TEMP\tauri.zip" -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
           }
         shell: pwsh
 
