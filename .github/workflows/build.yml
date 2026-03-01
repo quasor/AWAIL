@@ -32,7 +32,7 @@ jobs:
         run: brew install opus
 
       - name: Install cargo-binstall
-        run: which cargo-binstall || cargo install cargo-binstall
+        run: which cargo-binstall || curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
 
       - name: Install cargo-nih-plug
         run: which cargo-nih-plug || cargo binstall cargo-nih-plug -y --no-confirm || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
@@ -49,18 +49,22 @@ jobs:
       - name: Build Tauri app
         run: cargo tauri build -c crates/wail-tauri/tauri.conf.json
 
+      - name: List bundle output
+        run: find target/release/bundle -type d -maxdepth 3 2>/dev/null || echo "No bundle directory found"
+
       - name: Collect artifacts
         run: |
           mkdir -p dist
           cp target/release/wail-app dist/
           cp -r target/bundled/wail-plugin.clap dist/
           cp -r target/bundled/wail-plugin.vst3 dist/
-          cp -r target/release/bundle/macos/WAIL.app dist/
+          APP=$(find target/release/bundle -name "*.app" -maxdepth 3 2>/dev/null | head -1)
+          if [ -n "$APP" ]; then cp -r "$APP" dist/; else echo "Warning: no .app bundle found"; fi
           cp target/release/bundle/dmg/*.dmg dist/ || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wail-macos-x64
+          name: wail-macos
           path: dist/
 
   build-windows:
@@ -94,7 +98,7 @@ jobs:
       - name: Install cargo-binstall
         run: |
           if (!(Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
-            cargo install cargo-binstall
+            Set-ExecutionPolicy Unrestricted -Scope Process; iex (iwr "https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.ps1").Content
           }
         shell: pwsh
 
