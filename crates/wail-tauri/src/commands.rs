@@ -160,6 +160,7 @@ fn plugin_dirs() -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
     anyhow::bail!("Unsupported platform")
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn home_dir() -> anyhow::Result<std::path::PathBuf> {
     std::env::var("HOME")
         .map(std::path::PathBuf::from)
