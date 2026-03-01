@@ -1,3 +1,31 @@
+/// Maximum number of remote peers with independent audio channels.
+pub const MAX_REMOTE_PEERS: usize = 7;
+
+/// Per-peer isolated playback slot.
+pub struct PeerSlot {
+    pub peer_id: String,
+    pub samples: Vec<f32>,
+    pub active: bool,
+    read_pos: usize,
+}
+
+impl PeerSlot {
+    fn new() -> Self {
+        Self {
+            peer_id: String::new(),
+            samples: Vec::new(),
+            active: false,
+            read_pos: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.samples.clear();
+        self.active = false;
+        self.read_pos = 0;
+    }
+}
+
 /// NINJAM-style interval ring buffer for simultaneous record and playback.
 ///
 /// The core concept from NINJAM:
@@ -10,6 +38,9 @@
 /// - `process()` is the main method called per audio buffer
 /// - It writes input to the record slot and reads from the playback slot
 /// - At interval boundaries (driven by beat position), it swaps slots
+///
+/// In addition to the summed playback slot, per-peer isolated audio is kept
+/// in up to [`MAX_REMOTE_PEERS`] slots for independent DAW routing.
 ///
 /// # Interval Timing
 ///
@@ -39,6 +70,10 @@ pub struct IntervalRing {
     /// Interval parameters
     bars: u32,
     quantum: f64,
+    /// Per-peer isolated playback slots (up to MAX_REMOTE_PEERS)
+    peer_slots: Vec<PeerSlot>,
+    /// Maps peer_id → index into peer_slots for stable assignment
+    peer_slot_map: Vec<(String, usize)>,
 }
 
 /// A completed local recording ready for encoding.
@@ -66,6 +101,11 @@ impl IntervalRing {
         let max_seconds = beats_per_interval / 60.0; // at 60 BPM
         let slot_capacity = (sample_rate as f64 * max_seconds * channels as f64) as usize;
 
+        let mut peer_slots = Vec::with_capacity(MAX_REMOTE_PEERS);
+        for _ in 0..MAX_REMOTE_PEERS {
+            peer_slots.push(PeerSlot::new());
+        }
+
         Self {
             record_slot: Vec::with_capacity(slot_capacity),
             playback_slot: Vec::new(),
@@ -78,6 +118,8 @@ impl IntervalRing {
             channels,
             bars,
             quantum,
+            peer_slots,
+            peer_slot_map: Vec::new(),
         }
     }
 
@@ -166,6 +208,10 @@ impl IntervalRing {
         self.current_interval = None;
         self.completed.clear();
         self.pending_remote.clear();
+        for slot in &mut self.peer_slots {
+            slot.clear();
+        }
+        self.peer_slot_map.clear();
     }
 
     /// Current interval index, if any.
@@ -194,6 +240,68 @@ impl IntervalRing {
         (beat / beats_per_interval).floor() as i64
     }
 
+    /// Get the per-peer playback slots (up to MAX_REMOTE_PEERS).
+    pub fn peer_playback_slots(&self) -> &[PeerSlot] {
+        &self.peer_slots
+    }
+
+    /// Read audio from a specific peer slot into the output buffer.
+    /// Advances that slot's read position. Returns the number of samples written.
+    pub fn read_peer_playback(&mut self, slot: usize, output: &mut [f32]) -> usize {
+        if slot >= self.peer_slots.len() || !self.peer_slots[slot].active {
+            for s in output.iter_mut() {
+                *s = 0.0;
+            }
+            return 0;
+        }
+
+        let peer = &mut self.peer_slots[slot];
+        let available = peer.samples.len().saturating_sub(peer.read_pos);
+        let to_read = available.min(output.len());
+
+        if to_read > 0 {
+            output[..to_read]
+                .copy_from_slice(&peer.samples[peer.read_pos..peer.read_pos + to_read]);
+            peer.read_pos += to_read;
+        }
+
+        for s in &mut output[to_read..] {
+            *s = 0.0;
+        }
+
+        to_read
+    }
+
+    /// Return (slot_index, peer_id) for all active peer slots.
+    pub fn active_peer_slots(&self) -> Vec<(usize, String)> {
+        self.peer_slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.active)
+            .map(|(i, s)| (i, s.peer_id.clone()))
+            .collect()
+    }
+
+    /// Look up or assign a slot index for a peer_id. Returns None if all slots are full.
+    fn assign_peer_slot(&mut self, peer_id: &str) -> Option<usize> {
+        // Check existing assignment
+        for &(ref pid, idx) in &self.peer_slot_map {
+            if pid == peer_id {
+                return Some(idx);
+            }
+        }
+        // Find first inactive slot
+        for (i, slot) in self.peer_slots.iter_mut().enumerate() {
+            if !slot.active {
+                slot.peer_id = peer_id.to_string();
+                slot.active = true;
+                self.peer_slot_map.push((peer_id.to_string(), i));
+                return Some(i);
+            }
+        }
+        None // all slots full
+    }
+
     /// Swap intervals: move record → completed, mix pending remote → playback.
     fn swap_intervals(&mut self, completed_index: i64) {
         // Move the recorded audio to the completed queue
@@ -206,22 +314,31 @@ impl IntervalRing {
         }
         self.record_pos = 0;
 
+        // Clear per-peer slots (but keep assignments)
+        for slot in &mut self.peer_slots {
+            slot.samples.clear();
+            slot.read_pos = 0;
+            // Keep active and peer_id — only clear audio data
+        }
+
         // Mix pending remote intervals into the new playback slot
+        // AND distribute to per-peer slots
         self.playback_slot.clear();
         self.playback_pos = 0;
 
         let pending = std::mem::take(&mut self.pending_remote);
-        for remote in pending {
-            if self.playback_slot.is_empty() {
-                // First remote: just copy
-                self.playback_slot = remote.samples;
-            } else {
-                // Mix (sum) subsequent remotes into the playback slot
-                let mix_len = self.playback_slot.len().max(remote.samples.len());
-                self.playback_slot.resize(mix_len, 0.0);
-                for (i, sample) in remote.samples.iter().enumerate() {
-                    self.playback_slot[i] += sample;
-                }
+        for mut remote in pending {
+            // Mix into summed playback slot (read-only, before we move samples)
+            let mix_len = self.playback_slot.len().max(remote.samples.len());
+            self.playback_slot.resize(mix_len, 0.0);
+            for (i, sample) in remote.samples.iter().enumerate() {
+                self.playback_slot[i] += sample;
+            }
+
+            // Move samples to per-peer slot (zero-cost swap, no clone)
+            if let Some(slot_idx) = self.assign_peer_slot(&remote.peer_id) {
+                std::mem::swap(&mut self.peer_slots[slot_idx].samples, &mut remote.samples);
+                self.peer_slots[slot_idx].read_pos = 0;
             }
         }
     }
@@ -541,5 +658,97 @@ mod tests {
         // Must not panic
         ring.process(&input, &mut output, 10.0);
         assert!(ring.current_interval().is_some());
+    }
+
+    // --- Test: Per-peer playback slots ---
+
+    #[test]
+    fn per_peer_playback_slots() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Feed from two distinct peers
+        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-b", 0, vec![0.7f32; 128]);
+
+        // Cross boundary to activate playback
+        ring.process(&input, &mut output, 16.0);
+
+        // Read per-peer slots independently
+        let mut slot_a_out = vec![0.0f32; 128];
+        let mut slot_b_out = vec![0.0f32; 128];
+
+        let active = ring.active_peer_slots();
+        assert_eq!(active.len(), 2);
+
+        // Find which slot is which
+        let (a_idx, _) = active.iter().find(|(_, pid)| pid == "peer-a").unwrap();
+        let (b_idx, _) = active.iter().find(|(_, pid)| pid == "peer-b").unwrap();
+
+        ring.read_peer_playback(*a_idx, &mut slot_a_out);
+        ring.read_peer_playback(*b_idx, &mut slot_b_out);
+
+        // Peer A's slot should have 0.3
+        assert!(
+            slot_a_out.iter().all(|&s| (s - 0.3).abs() < f32::EPSILON),
+            "Peer A slot should be 0.3, got: {:?}", &slot_a_out[..4]
+        );
+        // Peer B's slot should have 0.7
+        assert!(
+            slot_b_out.iter().all(|&s| (s - 0.7).abs() < f32::EPSILON),
+            "Peer B slot should be 0.7, got: {:?}", &slot_b_out[..4]
+        );
+    }
+
+    #[test]
+    fn per_peer_and_summed_mix_consistent() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 64];
+        let mut output = vec![0.0f32; 64];
+
+        ring.process(&input, &mut output, 0.0);
+
+        ring.feed_remote("peer-x", 0, vec![0.2f32; 64]);
+        ring.feed_remote("peer-y", 0, vec![0.5f32; 64]);
+
+        // Cross boundary
+        ring.process(&input, &mut output, 16.0);
+
+        // Summed mix should be 0.2 + 0.5 = 0.7
+        assert!(
+            output.iter().all(|&s| (s - 0.7).abs() < 0.001),
+            "Summed mix should be 0.7, got: {:?}", &output[..4]
+        );
+
+        // Per-peer should sum to the same thing
+        let active = ring.active_peer_slots();
+        let mut sum = vec![0.0f32; 64];
+        for (idx, _) in &active {
+            let mut buf = vec![0.0f32; 64];
+            ring.read_peer_playback(*idx, &mut buf);
+            for (i, s) in buf.iter().enumerate() {
+                sum[i] += s;
+            }
+        }
+
+        for (i, &s) in sum.iter().enumerate() {
+            assert!(
+                (s - 0.7).abs() < 0.001,
+                "Sum of per-peer slots at {i} = {s}, expected 0.7"
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_peer_slot_returns_silence() {
+        let mut ring = make_ring();
+        let mut output = vec![1.0f32; 64];
+
+        // Slot 6 has never been assigned
+        ring.read_peer_playback(6, &mut output);
+        assert!(output.iter().all(|&s| s == 0.0));
     }
 }

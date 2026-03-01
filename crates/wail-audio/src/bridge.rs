@@ -1,6 +1,6 @@
 use crate::codec::{AudioDecoder, AudioEncoder};
 use crate::interval::AudioInterval;
-use crate::ring::IntervalRing;
+use crate::ring::{CompletedInterval, IntervalRing};
 use crate::wire::AudioWire;
 
 /// AudioBridge: connects the IntervalRing to Opus encoding and IPC framing.
@@ -55,8 +55,33 @@ impl AudioBridge {
         }
     }
 
+    /// Audio-thread safe: drive ring buffer and return raw completed intervals (no Opus).
+    ///
+    /// Use this from the real-time audio callback. Opus encoding should be done
+    /// on a background thread using `AudioEncoder` directly.
+    pub fn process_rt(
+        &mut self,
+        input: &[f32],
+        output: &mut [f32],
+        beat_position: f64,
+    ) -> Vec<CompletedInterval> {
+        self.ring.process(input, output, beat_position);
+        self.ring.take_completed()
+    }
+
+    /// Audio-thread safe: feed already-decoded PCM to ring for playback.
+    ///
+    /// Use this from the real-time audio callback after decoding Opus on a
+    /// background thread.
+    pub fn feed_decoded(&mut self, peer_id: &str, interval_index: i64, samples: Vec<f32>) {
+        self.ring.feed_remote(peer_id, interval_index, samples);
+    }
+
     /// Process one audio buffer from the DAW. Records input, outputs playback.
     /// Returns wire-encoded bytes for any interval that just completed.
+    ///
+    /// Note: This encodes Opus on the calling thread. For real-time audio callbacks,
+    /// prefer `process_rt()` + encoding on a background thread.
     pub fn process(
         &mut self,
         input: &[f32],
@@ -140,12 +165,39 @@ impl AudioBridge {
             .ok();
     }
 
+    /// Read per-peer isolated audio from a specific slot.
+    /// The slot index corresponds to `peer_playback_slots()` / `peer_info()`.
+    pub fn read_peer_playback(&mut self, slot: usize, output: &mut [f32]) -> usize {
+        self.ring.read_peer_playback(slot, output)
+    }
+
+    /// Return (slot_index, peer_id) for all active remote peers.
+    pub fn peer_info(&self) -> Vec<(usize, String)> {
+        self.ring.active_peer_slots()
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
 
     pub fn channels(&self) -> u16 {
         self.channels
+    }
+
+    pub fn bpm(&self) -> f64 {
+        self.bpm
+    }
+
+    pub fn quantum(&self) -> f64 {
+        self.quantum
+    }
+
+    pub fn bars(&self) -> u32 {
+        self.bars
+    }
+
+    pub fn bitrate_kbps(&self) -> u32 {
+        self.bitrate_kbps
     }
 }
 
