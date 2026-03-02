@@ -1,5 +1,6 @@
 mod commands;
 pub mod events;
+mod recorder;
 mod session;
 
 use commands::SessionState;
@@ -33,6 +34,8 @@ pub fn run() {
             commands::install_plugins,
             commands::check_plugins_installed,
             commands::list_public_rooms,
+            commands::get_default_recording_dir,
+            commands::cleanup_recordings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WAIL");

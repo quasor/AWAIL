@@ -51,6 +51,29 @@
               <input type="checkbox" id="test-tone">
               <label for="test-tone" class="remember-label">Enable test tone (no plugin needed)</label>
             </div>
+
+            <div class="recording-section">
+              <div class="remember-row">
+                <input type="checkbox" id="recording-enabled">
+                <label for="recording-enabled" class="remember-label">Record session locally</label>
+              </div>
+
+              <div id="recording-options" style="display:none">
+                <label for="recording-dir">Recording directory</label>
+                <div class="bpm-row">
+                  <input type="text" id="recording-dir" placeholder="~/Music/WAIL Sessions">
+                  <button type="button" id="browse-recording-dir" class="small-btn" style="width:auto;margin-top:0">Browse</button>
+                </div>
+
+                <div class="remember-row" style="margin-top:8px">
+                  <input type="checkbox" id="recording-stems">
+                  <label for="recording-stems" class="remember-label">Record per-peer stems (vs single mix)</label>
+                </div>
+
+                <label for="recording-retention">Keep recordings for (days, 0 = forever)</label>
+                <input type="number" id="recording-retention" value="30" min="0" max="365">
+              </div>
+            </div>
           </div>
         </details>
 
@@ -125,6 +148,14 @@
       <div class="test-tone-row">
         <span id="session-test-tone">OFF</span>
         <button type="button" id="toggle-test-tone-btn" class="small-btn">Enable</button>
+      </div>
+    </div>
+
+    <div class="stat-group" id="recording-stat" style="display:none">
+      <label>Recording</label>
+      <div class="recording-row">
+        <span id="session-recording" class="rec-badge">REC</span>
+        <span id="recording-size">0 MB</span>
       </div>
     </div>
 

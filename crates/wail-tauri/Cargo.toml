@@ -19,3 +19,5 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }
+hound = "3.5"
+chrono = { version = "0.4", features = ["serde"] }
