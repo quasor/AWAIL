@@ -1,0 +1,77 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # Skip the version-bump commit that knope pushes.
+    # Belt-and-suspenders: GITHUB_TOKEN pushes don't trigger workflows anyway.
+    if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install knope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -sSfL "https://github.com/knope-dev/knope/releases/latest/download/knope-x86_64-unknown-linux-musl.tgz" \
+            | tar -xz -C /usr/local/bin/
+
+      - name: Ensure changeset exists for patch release
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          HAS_CHANGESETS=false
+          HAS_CONVENTIONAL=false
+
+          # Check for changeset files
+          if ls .changeset/*.md 1>/dev/null 2>&1; then
+            HAS_CHANGESETS=true
+          fi
+
+          # Check for conventional commits since last tag
+          if [ -n "$LAST_TAG" ]; then
+            RANGE="${LAST_TAG}..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+          if git log --oneline "$RANGE" | grep -qE '^[0-9a-f]+ (feat|fix|feat!|fix!|refactor|perf)[(:!]'; then
+            HAS_CONVENTIONAL=true
+          fi
+
+          if [ "$HAS_CHANGESETS" = false ] && [ "$HAS_CONVENTIONAL" = false ]; then
+            echo "No changesets or conventional commits found. Creating fallback patch changeset."
+            mkdir -p .changeset
+            COMMIT_MSG=$(git log -1 --format='%s')
+            printf -- '---\ntype: patch\n---\n\n%s\n' "$COMMIT_MSG" > .changeset/auto-patch.md
+          fi
+
+      - name: Run knope release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: knope release
+
+      - name: Trigger release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+          TAG="v${VERSION}"
+          echo "Triggering release build for ${TAG}"
+          gh workflow run release.yml --ref "${TAG}" -f tag="${TAG}"
