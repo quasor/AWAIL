@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Max payload per DataChannel message.  Keep each chunk small enough
 /// to fit in a single DTLS record / UDP datagram (~1200 bytes MTU on
@@ -88,6 +88,8 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
+use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -152,7 +154,41 @@ impl PeerConnection {
         // Monitor connection state
         let rpid = remote_peer_id.clone();
         pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            info!(peer = %rpid, %state, "Peer connection state changed");
+            match state {
+                RTCPeerConnectionState::Failed => {
+                    warn!(peer = %rpid, "WebRTC connection FAILED — ICE negotiation could not establish a path");
+                }
+                RTCPeerConnectionState::Disconnected => {
+                    warn!(peer = %rpid, "WebRTC connection disconnected");
+                }
+                _ => {
+                    info!(peer = %rpid, %state, "Peer connection state changed");
+                }
+            }
+            Box::pin(async {})
+        }));
+
+        // Monitor ICE connection state (checking → connected → completed → failed)
+        let rpid = remote_peer_id.clone();
+        pc.on_ice_connection_state_change(Box::new(move |state: RTCIceConnectionState| {
+            match state {
+                RTCIceConnectionState::Failed => {
+                    warn!(peer = %rpid, "ICE connection FAILED — no viable candidate pair found (may need TURN)");
+                }
+                RTCIceConnectionState::Disconnected => {
+                    warn!(peer = %rpid, "ICE connection disconnected");
+                }
+                _ => {
+                    info!(peer = %rpid, state = %state, "ICE connection state changed");
+                }
+            }
+            Box::pin(async {})
+        }));
+
+        // Monitor ICE gathering state (new → gathering → complete)
+        let rpid = remote_peer_id.clone();
+        pc.on_ice_gathering_state_change(Box::new(move |state: RTCIceGathererState| {
+            info!(peer = %rpid, state = %state, "ICE gathering state changed");
             Box::pin(async {})
         }));
 
@@ -180,10 +216,13 @@ impl PeerConnection {
         self.setup_audio_channel(dc_audio).await;
 
         let (ice_tx, ice_rx) = mpsc::unbounded_channel();
+        let rpid = self.remote_peer_id.clone();
         self.pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
             let ice_tx = ice_tx.clone();
+            let rpid = rpid.clone();
             Box::pin(async move {
                 if let Some(c) = candidate {
+                    info!(peer = %rpid, typ = %c.typ, address = %c.address, port = c.port, "ICE candidate discovered");
                     let _ = ice_tx.send(c);
                 }
             })
@@ -245,10 +284,13 @@ impl PeerConnection {
         }));
 
         let (ice_tx, ice_rx) = mpsc::unbounded_channel();
+        let rpid2 = self.remote_peer_id.clone();
         self.pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
             let ice_tx = ice_tx.clone();
+            let rpid2 = rpid2.clone();
             Box::pin(async move {
                 if let Some(c) = candidate {
+                    info!(peer = %rpid2, typ = %c.typ, address = %c.address, port = c.port, "ICE candidate discovered");
                     let _ = ice_tx.send(c);
                 }
             })
