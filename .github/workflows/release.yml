@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.5.0)'
+        required: true
+        type: string
 
 jobs:
   build-macos:
@@ -10,6 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
@@ -75,6 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
@@ -155,6 +163,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
 
       - uses: dtolnay/rust-toolchain@stable
@@ -230,6 +239,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
 
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Zip platform artifacts
         run: |
           cd wail-release-macos/dist && zip -r ../../wail-macos-x64.zip . && cd ../..
@@ -248,6 +266,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             wail-macos-x64.zip
             wail-windows-x64.zip
