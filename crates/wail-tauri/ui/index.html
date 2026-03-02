@@ -39,6 +39,20 @@
 
           <label for="ipc-port">IPC Port</label>
           <input type="number" id="ipc-port" value="9191" min="1024" max="65535">
+
+          <label for="turn-url">TURN Server</label>
+          <input type="text" id="turn-url" placeholder="turn:your-ip:3478">
+
+          <label for="turn-username">TURN Username</label>
+          <input type="text" id="turn-username" placeholder="wail">
+
+          <label for="turn-credential">TURN Password</label>
+          <input type="password" id="turn-credential" placeholder="">
+
+          <div class="remember-row" style="margin-top:8px">
+            <input type="checkbox" id="test-tone">
+            <label for="test-tone" class="remember-label">Enable test tone (no plugin needed)</label>
+          </div>
         </div>
       </details>
 
@@ -74,11 +88,6 @@
     </div>
 
     <div class="stat-group">
-      <label>Position</label>
-      <span id="session-position">-</span>
-    </div>
-
-    <div class="stat-group">
       <label>Link Peers (LAN)</label>
       <span id="session-link-peers">0</span>
     </div>
@@ -103,6 +112,14 @@
     <div class="stat-group">
       <label>Plugin</label>
       <span id="session-plugin">disconnected</span>
+    </div>
+
+    <div class="stat-group">
+      <label>Test Tone</label>
+      <div class="test-tone-row">
+        <span id="session-test-tone">OFF</span>
+        <button type="button" id="toggle-test-tone-btn" class="small-btn">Enable</button>
+      </div>
     </div>
 
     <button type="button" id="disconnect-btn">Disconnect</button>

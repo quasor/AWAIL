@@ -1,9 +1,82 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
+
+/// Max payload per DataChannel message.  Keep each chunk small enough
+/// to fit in a single DTLS record / UDP datagram (~1200 bytes MTU on
+/// typical internet paths).  webrtc-rs SCTP fragmentation of large
+/// messages is unreliable over real networks, so we chunk at the
+/// application level instead.
+const CHUNK_MAX: usize = 1200;
+/// Magic bytes for chunked audio messages.
+const CHUNK_MAGIC: &[u8; 4] = b"WACH";
+const CHUNK_HEADER_SIZE: usize = 8; // 4 magic + 4 total_len
+const CHUNK_MAX_PAYLOAD: usize = CHUNK_MAX - CHUNK_HEADER_SIZE;
+
+/// Reassembly buffer for chunked audio messages arriving on a DataChannel.
+struct AudioReassembly {
+    buffer: Vec<u8>,
+    expected_len: usize,
+}
+
+/// Create a shared audio message handler that reassembles chunked messages.
+/// Returns a closure suitable for `dc.on_message()`.
+fn make_audio_handler(
+    tx: mpsc::Sender<Vec<u8>>,
+) -> (
+    Arc<Mutex<Option<AudioReassembly>>>,
+    impl Fn(DataChannelMessage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync + 'static,
+) {
+    let reassembly = Arc::new(Mutex::new(None::<AudioReassembly>));
+    let reassembly_clone = reassembly.clone();
+
+    let handler = move |msg: DataChannelMessage| {
+        let tx = tx.clone();
+        let reassembly = reassembly_clone.clone();
+        Box::pin(async move {
+            let data = msg.data.to_vec();
+
+            // Check if this is a chunked message
+            if data.len() >= CHUNK_HEADER_SIZE && &data[0..4] == CHUNK_MAGIC {
+                let total_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+                let payload = &data[CHUNK_HEADER_SIZE..];
+
+                let mut guard = match reassembly.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        debug!("Audio reassembly mutex poisoned, resetting");
+                        e.into_inner()
+                    }
+                };
+                let state = guard.get_or_insert_with(|| AudioReassembly {
+                    buffer: Vec::with_capacity(total_len),
+                    expected_len: total_len,
+                });
+                state.buffer.extend_from_slice(payload);
+
+                if state.buffer.len() >= state.expected_len {
+                    let complete = std::mem::take(&mut state.buffer);
+                    *guard = None;
+                    info!("[DC AUDIO IN] reassembled chunked {} bytes", complete.len());
+                    if tx.try_send(complete).is_err() {
+                        info!("[DC AUDIO IN] channel full — dropping reassembled frame");
+                    }
+                }
+            } else {
+                // Non-chunked message (small enough to fit in one DC message)
+                info!("[DC AUDIO IN] non-chunked {} bytes", data.len());
+                if tx.try_send(data).is_err() {
+                    info!("[DC AUDIO IN] channel full — dropping frame");
+                }
+            }
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    };
+
+    (reassembly, handler)
+}
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
@@ -15,6 +88,8 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
+use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -51,8 +126,8 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    /// Create a new peer connection.
-    pub async fn new(remote_peer_id: String) -> Result<Self> {
+    /// Create a new peer connection with the given ICE servers.
+    pub async fn new(remote_peer_id: String, ice_servers: Vec<RTCIceServer>) -> Result<Self> {
         let mut m = MediaEngine::default();
         m.register_default_codecs()?;
         let mut registry = Registry::new();
@@ -68,10 +143,7 @@ impl PeerConnection {
             .build();
 
         let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_string()],
-                ..Default::default()
-            }],
+            ice_servers,
             ..Default::default()
         };
 
@@ -82,7 +154,41 @@ impl PeerConnection {
         // Monitor connection state
         let rpid = remote_peer_id.clone();
         pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            info!(peer = %rpid, %state, "Peer connection state changed");
+            match state {
+                RTCPeerConnectionState::Failed => {
+                    warn!(peer = %rpid, "WebRTC connection FAILED — ICE negotiation could not establish a path");
+                }
+                RTCPeerConnectionState::Disconnected => {
+                    warn!(peer = %rpid, "WebRTC connection disconnected");
+                }
+                _ => {
+                    info!(peer = %rpid, %state, "Peer connection state changed");
+                }
+            }
+            Box::pin(async {})
+        }));
+
+        // Monitor ICE connection state (checking → connected → completed → failed)
+        let rpid = remote_peer_id.clone();
+        pc.on_ice_connection_state_change(Box::new(move |state: RTCIceConnectionState| {
+            match state {
+                RTCIceConnectionState::Failed => {
+                    warn!(peer = %rpid, "ICE connection FAILED — no viable candidate pair found (may need TURN)");
+                }
+                RTCIceConnectionState::Disconnected => {
+                    warn!(peer = %rpid, "ICE connection disconnected");
+                }
+                _ => {
+                    info!(peer = %rpid, state = %state, "ICE connection state changed");
+                }
+            }
+            Box::pin(async {})
+        }));
+
+        // Monitor ICE gathering state (new → gathering → complete)
+        let rpid = remote_peer_id.clone();
+        pc.on_ice_gathering_state_change(Box::new(move |state: RTCIceGathererState| {
+            info!(peer = %rpid, state = %state, "ICE gathering state changed");
             Box::pin(async {})
         }));
 
@@ -110,10 +216,13 @@ impl PeerConnection {
         self.setup_audio_channel(dc_audio).await;
 
         let (ice_tx, ice_rx) = mpsc::unbounded_channel();
+        let rpid = self.remote_peer_id.clone();
         self.pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
             let ice_tx = ice_tx.clone();
+            let rpid = rpid.clone();
             Box::pin(async move {
                 if let Some(c) = candidate {
+                    info!(peer = %rpid, typ = %c.typ, address = %c.address, port = c.port, "ICE candidate discovered");
                     let _ = ice_tx.send(c);
                 }
             })
@@ -164,15 +273,8 @@ impl PeerConnection {
                     }
                     "audio" => {
                         let _ = dc_audio_slot.set(dc.clone());
-                        let tx = audio_tx.clone();
-                        dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                            let tx = tx.clone();
-                            Box::pin(async move {
-                                if tx.try_send(msg.data.to_vec()).is_err() {
-                                    debug!("Audio channel full — dropping frame");
-                                }
-                            })
-                        }));
+                        let (_reassembly, handler) = make_audio_handler(audio_tx.clone());
+                        dc.on_message(Box::new(handler));
                     }
                     other => {
                         debug!(peer = %rpid, label = %other, "Ignoring unknown data channel");
@@ -182,10 +284,13 @@ impl PeerConnection {
         }));
 
         let (ice_tx, ice_rx) = mpsc::unbounded_channel();
+        let rpid2 = self.remote_peer_id.clone();
         self.pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
             let ice_tx = ice_tx.clone();
+            let rpid2 = rpid2.clone();
             Box::pin(async move {
                 if let Some(c) = candidate {
+                    info!(peer = %rpid2, typ = %c.typ, address = %c.address, port = c.port, "ICE candidate discovered");
                     let _ = ice_tx.send(c);
                 }
             })
@@ -257,16 +362,40 @@ impl PeerConnection {
     }
 
     /// Send binary audio data over the "audio" DataChannel.
+    /// Large messages are chunked to stay under the SCTP max message size.
     pub async fn send_audio(&self, data: &[u8]) -> Result<()> {
         match self.dc_audio.get() {
             Some(dc) if dc.ready_state() == RTCDataChannelState::Open => {
-                dc.send(&Bytes::copy_from_slice(data)).await?;
+                if data.len() <= CHUNK_MAX {
+                    // Fits in a single message — send as-is (no header)
+                    info!(peer = %self.remote_peer_id, bytes = data.len(), "[DC AUDIO OUT] sending single message");
+                    dc.send(&Bytes::copy_from_slice(data)).await?;
+                } else {
+                    // Chunk it: each chunk = [WACH][total_len u32 LE][payload]
+                    let total_len = data.len() as u32;
+                    let mut offset = 0;
+                    while offset < data.len() {
+                        let end = (offset + CHUNK_MAX_PAYLOAD).min(data.len());
+                        let mut chunk = Vec::with_capacity(CHUNK_HEADER_SIZE + (end - offset));
+                        chunk.extend_from_slice(CHUNK_MAGIC);
+                        chunk.extend_from_slice(&total_len.to_le_bytes());
+                        chunk.extend_from_slice(&data[offset..end]);
+                        dc.send(&Bytes::from(chunk)).await?;
+                        offset = end;
+                    }
+                    debug!(
+                        peer = %self.remote_peer_id,
+                        total = data.len(),
+                        chunks = (data.len() + CHUNK_MAX_PAYLOAD - 1) / CHUNK_MAX_PAYLOAD,
+                        "Sent chunked audio"
+                    );
+                }
             }
-            Some(_) => {
-                debug!(peer = %self.remote_peer_id, "Audio DataChannel not open yet — data dropped");
+            Some(dc) => {
+                info!(peer = %self.remote_peer_id, state = ?dc.ready_state(), "Audio DataChannel not open — data dropped");
             }
             None => {
-                debug!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
+                info!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
             }
         }
         Ok(())
@@ -305,7 +434,6 @@ impl PeerConnection {
 
     /// Set up message handling on the "audio" data channel (initiator path).
     async fn setup_audio_channel(&mut self, dc: Arc<RTCDataChannel>) {
-        let audio_tx = self.audio_tx.clone();
         let rpid = self.remote_peer_id.clone();
 
         let dc_clone = dc.clone();
@@ -314,15 +442,8 @@ impl PeerConnection {
             Box::pin(async {})
         }));
 
-        let tx = audio_tx.clone();
-        dc.on_message(Box::new(move |msg: DataChannelMessage| {
-            let tx = tx.clone();
-            Box::pin(async move {
-                if tx.try_send(msg.data.to_vec()).is_err() {
-                    debug!("Audio channel full — dropping frame");
-                }
-            })
-        }));
+        let (_reassembly, handler) = make_audio_handler(self.audio_tx.clone());
+        dc.on_message(Box::new(handler));
 
         let _ = self.dc_audio.set(dc);
     }

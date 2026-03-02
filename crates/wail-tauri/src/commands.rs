@@ -27,6 +27,10 @@ pub fn join_room(
     bars: Option<u32>,
     quantum: Option<f64>,
     ipc_port: Option<u16>,
+    test_tone: Option<bool>,
+    turn_url: Option<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
 ) -> Result<JoinResult, String> {
     let mut session = state.lock().map_err(|e| e.to_string())?;
     if session.is_some() {
@@ -43,6 +47,10 @@ pub fn join_room(
         bars: bars.unwrap_or(4),
         quantum: quantum.unwrap_or(4.0),
         ipc_port: ipc_port.unwrap_or(9191),
+        test_tone: test_tone.unwrap_or(false),
+        turn_url,
+        turn_username,
+        turn_credential,
     };
 
     let handle = crate::session::spawn_session(app, config).map_err(|e| e.to_string())?;
@@ -72,6 +80,17 @@ pub fn change_bpm(state: State<'_, SessionState>, bpm: f64) -> Result<(), String
         let _ = handle.cmd_tx.send(SessionCommand::ChangeBpm(bpm));
     } else {
         warn!("No active session for BPM change");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_test_tone(state: State<'_, SessionState>, enabled: bool) -> Result<(), String> {
+    let session = state.lock().map_err(|e| e.to_string())?;
+    if let Some(ref handle) = *session {
+        let _ = handle.cmd_tx.send(SessionCommand::SetTestTone(enabled));
+    } else {
+        warn!("No active session for test tone toggle");
     }
     Ok(())
 }

@@ -228,6 +228,20 @@ summary {
   font-size: 11px;
 }
 
+/* Test tone toggle */
+.test-tone-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.small-btn {
+  width: auto;
+  margin-top: 0;
+  padding: 4px 12px;
+  font-size: 11px;
+}
+
 /* Status indicators */
 .connected {
   color: var(--success);
