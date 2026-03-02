@@ -15,10 +15,14 @@ use wail_core::protocol::{SignalMessage, SignalPayload, SyncMessage};
 use peer::PeerConnection;
 use signaling::SignalingClient;
 
-/// Default ICE servers (Google STUN only).
+/// Default ICE servers (multiple STUN servers for reliability).
 pub fn default_ice_servers() -> Vec<RTCIceServer> {
     vec![RTCIceServer {
-        urls: vec!["stun:stun.l.google.com:19302".to_string()],
+        urls: vec![
+            "stun:stun.l.google.com:19302".to_string(),
+            "stun:stun1.l.google.com:19302".to_string(),
+            "stun:stun2.l.google.com:19302".to_string(),
+        ],
         ..Default::default()
     }]
 }
