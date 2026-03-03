@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.4 (2026-03-03)
+
+### Features
+
+- add local session recording with stems/mixed modes (#23) (#34)
+- integrate Metered TURN server credentials (#38)
+
+#### Automatic TURN server credentials via Metered
+
+WAIL now fetches TURN relay credentials automatically from Metered's REST API at session start. This replaces the manual TURN URL/username/credential configuration in the join-room UI. Credentials are short-lived (not stored in source), and the app falls back to STUN-only if the fetch fails.
+
+### Fixes
+
+- fix audio receive and TCP buffer bloat after plugin split (#36)
+
 ## 0.4.3 (2026-03-02)
 
 ### Features
