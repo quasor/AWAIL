@@ -342,6 +342,11 @@ impl PeerMesh {
     pub fn connected_peers(&self) -> Vec<String> {
         self.peers.keys().cloned().collect()
     }
+
+    /// Check whether any connected peer has an open audio DataChannel.
+    pub fn any_audio_dc_open(&self) -> bool {
+        self.peers.values().any(|pc| pc.is_audio_dc_open())
+    }
 }
 
 /// Events from the peer mesh.

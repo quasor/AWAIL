@@ -306,6 +306,12 @@ impl PeerConnection {
                     }
                     "audio" => {
                         let _ = dc_audio_slot.set(dc.clone());
+                        let rpid_audio = rpid.clone();
+                        let dc_audio_clone = dc.clone();
+                        dc.on_open(Box::new(move || {
+                            info!(peer = %rpid_audio, label = %dc_audio_clone.label(), "Audio channel open (responder)");
+                            Box::pin(async {})
+                        }));
                         let (_reassembly, handler) = make_audio_handler(audio_tx.clone());
                         dc.on_message(Box::new(handler));
                     }
@@ -426,10 +432,10 @@ impl PeerConnection {
                 }
             }
             Some(dc) => {
-                info!(peer = %self.remote_peer_id, state = ?dc.ready_state(), "Audio DataChannel not open — data dropped");
+                warn!(peer = %self.remote_peer_id, state = ?dc.ready_state(), "Audio DataChannel not open — data dropped");
             }
             None => {
-                info!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
+                warn!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
             }
         }
         Ok(())
@@ -492,6 +498,13 @@ impl PeerConnection {
         dc.on_message(Box::new(handler));
 
         let _ = self.dc_audio.set(dc);
+    }
+
+    /// Check whether the audio DataChannel is in the Open state.
+    pub fn is_audio_dc_open(&self) -> bool {
+        self.dc_audio
+            .get()
+            .map_or(false, |dc| dc.ready_state() == RTCDataChannelState::Open)
     }
 
     /// Take the sync message receiver for forwarding to a unified channel.
