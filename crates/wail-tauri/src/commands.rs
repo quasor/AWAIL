@@ -9,6 +9,8 @@ use crate::session::{SessionCommand, SessionConfig, SessionHandle};
 
 pub type SessionState = Mutex<Option<SessionHandle>>;
 
+const SIGNALING_URL: &str = "https://wail.val.run/";
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JoinResult {
     pub peer_id: String,
@@ -26,8 +28,8 @@ pub struct PublicRoomInfo {
 }
 
 #[tauri::command]
-pub async fn list_public_rooms(server: String) -> Result<Vec<PublicRoomInfo>, String> {
-    let rooms = wail_net::signaling::list_public_rooms(&server)
+pub async fn list_public_rooms() -> Result<Vec<PublicRoomInfo>, String> {
+    let rooms = wail_net::signaling::list_public_rooms(SIGNALING_URL)
         .await
         .map_err(|e| e.to_string())?;
     Ok(rooms
@@ -46,7 +48,6 @@ pub async fn list_public_rooms(server: String) -> Result<Vec<PublicRoomInfo>, St
 pub fn join_room(
     app: tauri::AppHandle,
     state: State<'_, SessionState>,
-    server: String,
     room: String,
     password: Option<String>,
     display_name: String,
@@ -55,9 +56,6 @@ pub fn join_room(
     quantum: Option<f64>,
     ipc_port: Option<u16>,
     test_tone: Option<bool>,
-    turn_url: Option<String>,
-    turn_username: Option<String>,
-    turn_credential: Option<String>,
     recording_enabled: Option<bool>,
     recording_directory: Option<String>,
     recording_stems: Option<bool>,
@@ -70,7 +68,7 @@ pub fn join_room(
 
     let bpm = bpm.unwrap_or(120.0);
     let config = SessionConfig {
-        server,
+        server: SIGNALING_URL.to_string(),
         room,
         password,
         display_name,
@@ -79,9 +77,6 @@ pub fn join_room(
         quantum: quantum.unwrap_or(4.0),
         ipc_port: ipc_port.unwrap_or(9191),
         test_tone: test_tone.unwrap_or(false),
-        turn_url,
-        turn_username,
-        turn_credential,
         recording: if recording_enabled.unwrap_or(false) {
             Some(RecordingConfig {
                 enabled: true,
