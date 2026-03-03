@@ -15,6 +15,7 @@ use wail_net::PeerMesh;
 
 use crate::events::*;
 use crate::emit_log;
+use crate::recorder::{RecordingConfig, SessionRecorder};
 
 /// Shorthand: log to tracing + emit to UI
 macro_rules! ui_info {
@@ -66,6 +67,7 @@ pub struct SessionConfig {
     pub turn_url: Option<String>,
     pub turn_username: Option<String>,
     pub turn_credential: Option<String>,
+    pub recording: Option<RecordingConfig>,
 }
 
 pub fn spawn_session(app: AppHandle, config: SessionConfig) -> Result<SessionHandle> {
@@ -109,6 +111,7 @@ async fn session_loop(
         turn_url,
         turn_username,
         turn_credential,
+        recording: recording_config,
     } = config;
 
     ui_info!(&app, "Starting peer {peer_id} as {display_name} in room {room} (BPM {bpm}, {bars} bars, quantum {quantum})");
@@ -198,6 +201,23 @@ async fn session_loop(
     let mut next_conn_id: usize = 0;
     let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
     let (ipc_disconnect_tx, mut ipc_disconnect_rx) = mpsc::channel::<usize>(16);
+
+    // Initialize local recording if configured
+    let recorder: Option<SessionRecorder> = match recording_config {
+        Some(ref cfg) if cfg.enabled => {
+            match SessionRecorder::start(cfg.clone(), &room) {
+                Ok(r) => {
+                    ui_info!(&app, "Recording enabled: {}", cfg.directory);
+                    Some(r)
+                }
+                Err(e) => {
+                    ui_warn!(&app, "Failed to start recording: {e}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
 
     ui_info!(&app, "Waiting for peers...");
 
@@ -316,6 +336,10 @@ async fn session_loop(
                     audio_intervals_sent += 1;
                     let peers = mesh.connected_peers();
                     ui_info!(&app, "[AUDIO SEND] wire={} bytes, peers=[{}], total_sent={}", wire_data.len(), peers.join(", "), audio_intervals_sent);
+
+                    if let Some(ref rec) = recorder {
+                        rec.record_own(wire_data);
+                    }
                 }
             }
 
@@ -505,6 +529,11 @@ async fn session_loop(
                     }
                 }
 
+                if let Some(ref rec) = recorder {
+                    let name = peer_names.get(&from).and_then(|n| n.clone());
+                    rec.record_peer(from.clone(), name, data.clone());
+                }
+
                 if !ipc_recv_writers.is_empty() {
                     let msg = IpcMessage::encode_audio(&from, &data);
                     let frame = IpcFramer::encode_frame(&msg);
@@ -619,6 +648,8 @@ async fn session_loop(
                         audio_dc_open: dc_open,
                         plugin_connected: !ipc_recv_writers.is_empty(),
                         test_tone_enabled,
+                        recording: recorder.is_some(),
+                        recording_size_bytes: recorder.as_ref().map_or(0, |r| r.bytes_written()),
                     });
 
                     // Broadcast audio pipeline status to remote peers
@@ -632,6 +663,12 @@ async fn session_loop(
                 }
             }
         }
+    }
+
+    // Finalize recording if active
+    if let Some(ref rec) = recorder {
+        rec.finalize();
+        ui_info!(&app, "Recording finalized");
     }
 
     Ok(())

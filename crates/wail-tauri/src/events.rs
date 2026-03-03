@@ -53,6 +53,8 @@ pub struct StatusUpdate {
     pub audio_dc_open: bool,
     pub plugin_connected: bool,
     pub test_tone_enabled: bool,
+    pub recording: bool,
+    pub recording_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -21,7 +21,7 @@ let roomRefreshTimer = null;
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'display-name', 'server', 'bars', 'quantum', 'ipc-port', 'test-tone', 'turn-url', 'turn-username', 'turn-credential'];
+const rememberFields = ['room', 'password', 'display-name', 'server', 'bars', 'quantum', 'ipc-port', 'test-tone', 'turn-url', 'turn-username', 'turn-credential', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
 
 function loadSettings() {
   try {
@@ -56,6 +56,11 @@ function saveSettings() {
 }
 
 loadSettings();
+
+// Restore recording options visibility after settings load
+if (document.getElementById('recording-enabled').checked) {
+  document.getElementById('recording-options').style.display = '';
+}
 
 document.getElementById('remember').addEventListener('change', () => {
   if (!document.getElementById('remember').checked) {
@@ -147,6 +152,10 @@ async function joinPublicRoom(room) {
     turnUrl: document.getElementById('turn-url').value || null,
     turnUsername: document.getElementById('turn-username').value || null,
     turnCredential: document.getElementById('turn-credential').value || null,
+    recordingEnabled: document.getElementById('recording-enabled').checked,
+    recordingDirectory: document.getElementById('recording-dir').value || null,
+    recordingStems: document.getElementById('recording-stems').checked,
+    recordingRetentionDays: parseInt(document.getElementById('recording-retention').value) || 30,
   };
   if (!params.displayName.trim()) {
     showError(joinError, 'Display name is required');
@@ -164,6 +173,26 @@ async function joinPublicRoom(room) {
 }
 
 document.getElementById('refresh-rooms-btn').addEventListener('click', fetchPublicRooms);
+
+// --- Recording options toggle ---
+document.getElementById('recording-enabled').addEventListener('change', (e) => {
+  document.getElementById('recording-options').style.display = e.target.checked ? '' : 'none';
+});
+
+document.getElementById('browse-recording-dir').addEventListener('click', async () => {
+  try {
+    const dir = await invoke('get_default_recording_dir');
+    document.getElementById('recording-dir').value = dir;
+  } catch (err) {
+    console.error('Failed to get default recording dir:', err);
+  }
+});
+
+// Populate default recording dir on load
+invoke('get_default_recording_dir').then(dir => {
+  const el = document.getElementById('recording-dir');
+  if (!el.value) el.value = dir;
+}).catch(() => {});
 
 function showJoin() {
   joinScreen.style.display = '';
@@ -188,6 +217,8 @@ function showSession(room) {
   document.getElementById('session-interval').textContent = '-';
   testToneEnabled = document.getElementById('test-tone').checked;
   updateTestToneUI();
+  document.getElementById('recording-stat').style.display =
+    document.getElementById('recording-enabled').checked ? '' : 'none';
 }
 
 function updateTestToneUI() {
@@ -226,6 +257,10 @@ joinForm.addEventListener('submit', async (e) => {
     turnUrl: document.getElementById('turn-url').value || null,
     turnUsername: document.getElementById('turn-username').value || null,
     turnCredential: document.getElementById('turn-credential').value || null,
+    recordingEnabled: document.getElementById('recording-enabled').checked,
+    recordingDirectory: document.getElementById('recording-dir').value || null,
+    recordingStems: document.getElementById('recording-stems').checked,
+    recordingRetentionDays: parseInt(document.getElementById('recording-retention').value) || 30,
   };
 
   try {
@@ -302,6 +337,13 @@ async function setupListeners() {
     // Sync test tone state
     testToneEnabled = s.test_tone_enabled;
     updateTestToneUI();
+
+    // Update recording status
+    if (s.recording) {
+      document.getElementById('recording-stat').style.display = '';
+      const mb = (s.recording_size_bytes / (1024 * 1024)).toFixed(1);
+      document.getElementById('recording-size').textContent = `${mb} MB`;
+    }
 
     // Update peer list
     const peerList = document.getElementById('peer-list');

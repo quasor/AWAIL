@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use tracing::{info, warn};
 
+use crate::recorder::RecordingConfig;
 use crate::session::{SessionCommand, SessionConfig, SessionHandle};
 
 pub type SessionState = Mutex<Option<SessionHandle>>;
@@ -57,6 +58,10 @@ pub fn join_room(
     turn_url: Option<String>,
     turn_username: Option<String>,
     turn_credential: Option<String>,
+    recording_enabled: Option<bool>,
+    recording_directory: Option<String>,
+    recording_stems: Option<bool>,
+    recording_retention_days: Option<u32>,
 ) -> Result<JoinResult, String> {
     let mut session = state.lock().map_err(|e| e.to_string())?;
     if session.is_some() {
@@ -77,6 +82,17 @@ pub fn join_room(
         turn_url,
         turn_username,
         turn_credential,
+        recording: if recording_enabled.unwrap_or(false) {
+            Some(RecordingConfig {
+                enabled: true,
+                directory: recording_directory
+                    .unwrap_or_else(|| crate::recorder::default_recording_dir().unwrap_or_default()),
+                stems: recording_stems.unwrap_or(false),
+                retention_days: recording_retention_days.unwrap_or(30),
+            })
+        } else {
+            None
+        },
     };
 
     let handle = crate::session::spawn_session(app, config).map_err(|e| e.to_string())?;
@@ -249,4 +265,27 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_default_recording_dir() -> Result<String, String> {
+    crate::recorder::default_recording_dir().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CleanupResult {
+    pub deleted_count: u32,
+    pub freed_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn cleanup_recordings(directory: String, retention_days: u32) -> Result<CleanupResult, String> {
+    tokio::task::spawn_blocking(move || {
+        let (deleted_count, freed_bytes) =
+            crate::recorder::cleanup_old_sessions(std::path::Path::new(&directory), retention_days)
+                .map_err(|e| e.to_string())?;
+        Ok(CleanupResult { deleted_count, freed_bytes })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
