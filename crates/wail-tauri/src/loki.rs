@@ -252,6 +252,7 @@ async fn flush(client: &reqwest::Client, buffer: &mut Vec<LogLine>) {
     let url = match get_loki_url() {
         Some(u) => u,
         None => {
+            buffer.clear();
             return;
         }
     };
@@ -259,6 +260,7 @@ async fn flush(client: &reqwest::Client, buffer: &mut Vec<LogLine>) {
     let user = match get_loki_user() {
         Some(u) => u,
         None => {
+            buffer.clear();
             return;
         }
     };
@@ -266,6 +268,7 @@ async fn flush(client: &reqwest::Client, buffer: &mut Vec<LogLine>) {
     let token = match get_loki_token() {
         Some(t) => t,
         None => {
+            buffer.clear();
             return;
         }
     };
