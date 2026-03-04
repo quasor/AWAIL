@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::Result;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn, Instrument};
@@ -91,6 +91,13 @@ pub fn spawn_session(app: AppHandle, config: SessionConfig) -> Result<SessionHan
                 ui_error!(&app, "Session error: {e}");
                 crate::hb::report(&e.to_string()).await;
                 let _ = app.emit("session:error", SessionError { message: e.to_string() });
+            }
+            // Clear session state so join_room can be called again.
+            // Without this, sessions that end due to signaling close or errors
+            // leave stale state, causing "Already in a session" on next join.
+            let state = app.state::<crate::commands::SessionState>();
+            if let Ok(mut session) = state.lock() {
+                *session = None;
             }
             let _ = app.emit("session:ended", SessionEnded {});
         }
