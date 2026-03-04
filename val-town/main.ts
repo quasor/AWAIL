@@ -39,6 +39,23 @@ try { await sqlite.execute("ALTER TABLE peers ADD COLUMN display_name TEXT"); } 
 try { await sqlite.execute("ALTER TABLE peers ADD COLUMN bpm REAL"); } catch (_) {}
 // Migrate rooms table — add created_at if missing (from older schema)
 try { await sqlite.execute("ALTER TABLE rooms ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"); } catch (_) {}
+// Migrate rooms table — remove NOT NULL from password_hash (for public rooms)
+try {
+  await sqlite.execute("INSERT INTO rooms (room, password_hash, created_at) VALUES ('__migration_test__', NULL, 0)");
+  await sqlite.execute("DELETE FROM rooms WHERE room = '__migration_test__'");
+} catch (_) {
+  // NOT NULL constraint still in place — recreate table
+  await sqlite.batch([
+    `CREATE TABLE rooms_new (
+      room TEXT PRIMARY KEY,
+      password_hash TEXT,
+      created_at INTEGER NOT NULL DEFAULT 0
+    )`,
+    `INSERT INTO rooms_new SELECT room, password_hash, created_at FROM rooms`,
+    `DROP TABLE rooms`,
+    `ALTER TABLE rooms_new RENAME TO rooms`,
+  ]);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
