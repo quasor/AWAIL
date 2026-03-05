@@ -320,7 +320,10 @@ async fn session_loop(
                                 Ok(Ok(_)) => {
                                     stream_index = u16::from_le_bytes(si_buf);
                                 }
-                                _ => {
+                                Ok(Err(e)) => {
+                                    tracing::warn!("Plugin (conn {conn_id}): IO error reading stream_index: {e}");
+                                }
+                                Err(_) => {
                                     // Legacy send plugin — no stream_index, default to 0
                                 }
                             }

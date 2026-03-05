@@ -516,12 +516,18 @@ impl IntervalRing {
                             }
                         }
                         slot.read_pos = 0;
+                        tracing::warn!(
+                            peer = %remote.peer_id,
+                            stream = remote.stream_id,
+                            "All slots full — merged into stream 0"
+                        );
+                    } else {
+                        tracing::warn!(
+                            peer = %remote.peer_id,
+                            stream = remote.stream_id,
+                            "All slots full and no stream 0 slot — audio dropped"
+                        );
                     }
-                    tracing::warn!(
-                        peer = %remote.peer_id,
-                        stream = remote.stream_id,
-                        "All slots full — merged into stream 0"
-                    );
                 }
             }
         }
