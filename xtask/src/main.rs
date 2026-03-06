@@ -188,7 +188,11 @@ fn bundle_plugin(args: &[String]) -> Result<()> {
                 let bundle = bundled.join(format!("{pkg}.{ext}"));
                 let macos_dir = bundle.join("Contents/MacOS");
                 if bundle.exists() {
-                    fs::remove_dir_all(&bundle)?;
+                    if bundle.is_dir() {
+                        fs::remove_dir_all(&bundle)?;
+                    } else {
+                        fs::remove_file(&bundle)?;
+                    }
                 }
                 fs::create_dir_all(&macos_dir)?;
                 fs::copy(&dylib, macos_dir.join(pkg))
