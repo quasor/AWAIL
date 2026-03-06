@@ -4,13 +4,18 @@ mod filelog;
 mod hb;
 mod identity;
 mod peers;
+mod plugin_install;
 mod recorder;
 mod session;
+
+use std::sync::Mutex;
 
 use commands::SessionState;
 use events::LogEntry;
 use tauri::{Emitter, Manager};
 use tracing_subscriber::prelude::*;
+
+pub struct PluginInstallErrors(pub Mutex<Vec<String>>);
 
 /// Emit a warning log to the frontend.
 pub fn emit_log(app: &tauri::AppHandle, level: &str, message: String) {
@@ -39,6 +44,7 @@ pub fn run() {
     let th = telemetry_handle.clone();
     tauri::Builder::default()
         .manage(SessionState::default())
+        .manage(PluginInstallErrors(Mutex::new(Vec::new())))
         .manage(telemetry_handle)
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
@@ -47,6 +53,18 @@ pub fn run() {
             }
             let peer_identity = identity::get_or_create(&data_dir);
             app.manage(identity::PeerIdentity(peer_identity));
+            let install_errors = match app.path().resource_dir() {
+                Ok(resource_dir) => plugin_install::install_if_missing(&resource_dir),
+                Err(e) => {
+                    tracing::warn!("plugin_install: could not resolve resource directory, skipping auto-install: {e}");
+                    vec![format!("Could not locate bundled plugins (resource directory unavailable: {e}). Please install WAIL Send and WAIL Recv manually using cargo xtask install-plugin.")]
+                }
+            };
+            if !install_errors.is_empty() {
+                if let Ok(mut state) = app.state::<PluginInstallErrors>().0.lock() {
+                    *state = install_errors;
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -58,6 +76,7 @@ pub fn run() {
             commands::list_public_rooms,
             commands::get_default_recording_dir,
             commands::cleanup_recordings,
+            commands::get_plugin_install_errors,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WAIL");
