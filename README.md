@@ -6,7 +6,7 @@ WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across 
 
 Download the latest release from the [Releases page](https://github.com/MostDistant/WAIL/releases).
 
-**macOS** — Open the DMG and drag WAIL to Applications. Run the included `.pkg` installer to install the audio plugins.
+**macOS** — Open the DMG and drag WAIL to Applications. The WAIL Send and Recv plugins are automatically installed to your plugin directories on first launch.
 
 **macOS (Homebrew, from source)** — Build and install directly from source:
 
@@ -23,9 +23,9 @@ wail-install-plugins
 
 Then rescan plugins in your DAW. Note: the Homebrew install provides the `wail` command-line binary. For the full macOS `.app` bundle (dock icon, menu bar), use the DMG installer above.
 
-**Windows** — Run the `.exe` installer. Copy the bundled `.clap` and `.vst3` plugin files to your DAW's plugin directory.
+**Windows** — Run the `.exe` installer. The WAIL Send and Recv plugins are automatically installed to your plugin directories on first launch.
 
-**Linux** — Install the `.deb` package (`sudo dpkg -i wail_*.deb`) or download the AppImage and make it executable (`chmod +x WAIL_*.AppImage`). Copy the plugin files to `~/.clap/` and `~/.vst3/`.
+**Linux** — Install the `.deb` package (`sudo dpkg -i wail_*.deb`) or download the AppImage and make it executable (`chmod +x WAIL_*.AppImage`). The WAIL Send and Recv plugins are automatically installed to `~/.clap/` and `~/.vst3/` on first launch.
 
 ## Getting Started
 

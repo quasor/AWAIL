@@ -48,8 +48,9 @@ pub fn run() {
             }
             let peer_identity = identity::get_or_create(&data_dir);
             app.manage(identity::PeerIdentity(peer_identity));
-            if let Ok(resource_dir) = app.path().resource_dir() {
-                plugin_install::install_if_missing(&resource_dir);
+            match app.path().resource_dir() {
+                Ok(resource_dir) => plugin_install::install_if_missing(&resource_dir),
+                Err(e) => tracing::warn!("plugin_install: could not resolve resource directory, skipping auto-install: {e}"),
             }
             Ok(())
         })
