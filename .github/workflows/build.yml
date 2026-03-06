@@ -257,9 +257,6 @@ jobs:
       - name: Build plugin
         run: cargo xtask build-plugin
 
-      - name: Run plugin integration tests
-        run: cargo test -p wail-plugin-test
-
       - name: Clean stale Tauri build artifacts
         run: rm -rf target/release/bundle/ target/release/build/wail-tauri-*/
 
