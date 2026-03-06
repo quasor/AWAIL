@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.2 (2026-03-06)
+
+### Fixes
+
+- auto-install plugins from Homebrew lib path, suppress dev-mode dialog (#110)
+- Auto-install plugins from Homebrew lib path; suppress false error dialog in dev mode.
+
 ## 1.4.1 (2026-03-06)
 
 ### Fixes
