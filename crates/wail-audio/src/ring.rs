@@ -1493,4 +1493,178 @@ mod tests {
         // Silence after audio
         assert_eq!(output[32], 0.0);
     }
+
+    // --- Tests: reconnect with same peer_id (WebRTC-level reconnect, no new peer_id) ---
+
+    /// When the WebRTC connection drops and reconnects without a new peer_id
+    /// (session retries the same connection), no PeerLeft IPC is sent.
+    /// The session sends PeerJoined again with the same peer_id and identity.
+    /// The ring must keep the peer on the same slot — the slot was never freed.
+    #[test]
+    fn same_peer_id_reconnect_keeps_same_slot() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // Initial connection: peer-a joins and is assigned slot 0
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let slot_a = ring.active_peer_slots()
+            .iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+
+        // WebRTC reconnect: PeerJoined IPC re-sent with same peer_id/identity,
+        // but NO PeerLeft was sent (slot is still active)
+        ring.notify_peer_joined("peer-a", "identity-alice");
+
+        // Audio resumes from the same peer_id
+        ring.feed_remote("peer-a", 0, 1, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        let active = ring.active_peer_slots();
+        let slot_after = active.iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+
+        assert_eq!(slot_after, slot_a,
+            "Same peer_id reconnect must stay on the same slot");
+        assert_eq!(active.len(), 1, "Only one peer should be tracked");
+    }
+
+    // --- Tests: reconnect with stale peer (regression for session eviction fix) ---
+
+    /// Without session-side eviction the old peer's slot stays active, blocking
+    /// the reconnecting peer from reclaiming it via affinity.
+    ///
+    /// This documents the bug at the ring level: if `remove_peer` is NOT called
+    /// before the new peer_id arrives, the reconnecting peer ends up on a
+    /// different slot.  The fix in session.rs detects this via identity matching
+    /// and calls `remove_peer` (sending PeerLeft IPC) before `notify_peer_joined`.
+    #[test]
+    fn reconnect_without_eviction_gets_different_slot() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // peer-a joins and is assigned slot 0 via audio
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let slot_a = ring.active_peer_slots()
+            .iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+
+        // Simulate the bug: peer-a-new arrives with the same identity but
+        // remove_peer("peer-a") was never called — the old slot is still active.
+        ring.notify_peer_joined("peer-a-new", "identity-alice");
+        ring.feed_remote("peer-a-new", 0, 1, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        let active = ring.active_peer_slots();
+        let slot_new = active.iter()
+            .find(|(_, pid, _)| pid == "peer-a-new")
+            .unwrap()
+            .0;
+
+        // Without eviction peer-a-new cannot reclaim peer-a's slot (still active)
+        assert_ne!(slot_new, slot_a,
+            "Without eviction the new peer_id gets a different slot");
+        // Both the stale and the new peer are tracked simultaneously
+        assert_eq!(active.len(), 2);
+    }
+
+    /// With session-side eviction the sequence is: remove_peer(old) →
+    /// notify_peer_joined(new, same identity).  The ring restores the original
+    /// slot via affinity.  This is the behaviour guaranteed by the fix in
+    /// session.rs that calls remove_peer when it detects two peer_ids sharing
+    /// the same identity.
+    #[test]
+    fn eviction_before_reconnect_reclaims_slot() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // peer-a joins and is assigned slot 0
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let slot_a = ring.active_peer_slots()
+            .iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+
+        // Session eviction: PeerLeft IPC → remove_peer; PeerJoined IPC → notify_peer_joined
+        ring.remove_peer("peer-a");
+        ring.notify_peer_joined("peer-a-new", "identity-alice");
+
+        ring.feed_remote("peer-a-new", 0, 1, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        let active = ring.active_peer_slots();
+        let slot_new = active.iter()
+            .find(|(_, pid, _)| pid == "peer-a-new")
+            .unwrap()
+            .0;
+
+        assert_eq!(slot_new, slot_a,
+            "After eviction the reconnecting peer reclaims its original slot");
+        assert_eq!(active.len(), 1);
+    }
+
+    /// Two peers are active. One peer reconnects with a new peer_id (old slot
+    /// occupied).  The session evicts the stale entry.  The reconnecting peer
+    /// reclaims their original slot; the other peer is unaffected.
+    #[test]
+    fn eviction_with_bystander_peer_unaffected() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.notify_peer_joined("peer-b", "identity-bob");
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-b", 0, 0, vec![0.7f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let slot_a = ring.active_peer_slots()
+            .iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+        let slot_b = ring.active_peer_slots()
+            .iter()
+            .find(|(_, pid, _)| pid == "peer-b")
+            .unwrap()
+            .0;
+        assert_ne!(slot_a, slot_b);
+
+        // Session evicts peer-a (reconnect detected) and registers new peer_id
+        ring.remove_peer("peer-a");
+        ring.notify_peer_joined("peer-a-new", "identity-alice");
+
+        ring.feed_remote("peer-a-new", 0, 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-b", 0, 1, vec![0.7f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        let active = ring.active_peer_slots();
+        let new_a = active.iter().find(|(_, pid, _)| pid == "peer-a-new").unwrap().0;
+        let new_b = active.iter().find(|(_, pid, _)| pid == "peer-b").unwrap().0;
+
+        assert_eq!(new_a, slot_a, "peer-a-new reclaims peer-a's original slot");
+        assert_eq!(new_b, slot_b, "peer-b is unaffected by peer-a's reconnect");
+    }
 }

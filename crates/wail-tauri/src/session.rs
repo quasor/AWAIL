@@ -707,6 +707,64 @@ async fn session_loop(
                         ui_info!(&app, "Hello from {name_display} ({pid})");
                         peer_names.insert(pid.clone(), name.clone());
                         if let Some(ref rid) = remote_identity {
+                            // Evict any stale peer_id that holds this identity.
+                            // This happens when a peer crashes and reconnects with a new peer_id
+                            // before the old connection has been cleaned up — without eviction the
+                            // old slot would still be occupied, forcing the reconnecting peer onto
+                            // a new slot and breaking channel affinity.
+                            let old_pid: Option<String> = peer_identities
+                                .iter()
+                                .find(|(p, ident)| ident.as_str() == rid.as_str() && p.as_str() != pid.as_str())
+                                .map(|(p, _)| p.clone());
+
+                            if let Some(ref old) = old_pid {
+                                ui_info!(&app, "Peer {name_display} reconnected with new peer_id (old={old}, new={pid}) — evicting stale entry");
+
+                                // Notify recv plugins to free the old slot
+                                if !ipc_recv_writers.is_empty() {
+                                    let evict_msg = IpcMessage::encode_peer_left(old);
+                                    let evict_frame = IpcFramer::encode_frame(&evict_msg);
+                                    let mut dead = Vec::new();
+                                    for (id, writer) in &mut ipc_recv_writers {
+                                        if writer.write_all(&evict_frame).await.is_err() {
+                                            dead.push(*id);
+                                        }
+                                    }
+                                    for id in &dead {
+                                        ui_warn!(&app, "Removing failed IPC writer (conn {id})");
+                                    }
+                                    ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
+                                }
+
+                                // Free session-side slots and store affinity for the identity
+                                let old_keys: Vec<(String, u16)> = peer_slots.keys()
+                                    .filter(|(p, _)| p == old)
+                                    .cloned()
+                                    .collect();
+                                for key in old_keys {
+                                    if let Some(slot) = peer_slots.remove(&key) {
+                                        slot_occupied[slot] = false;
+                                        slot_affinity.insert((rid.clone(), key.1), slot);
+                                    }
+                                }
+
+                                // Clean up old peer from all tracking maps
+                                peer_identities.remove(old);
+                                peer_names.remove(old);
+                                hello_sent.remove(old);
+                                peer_reconnect_attempts.remove(old);
+                                peer_last_seen.remove(old);
+                                peer_audio_recv_count.remove(old);
+                                peer_audio_recv_prev.remove(old);
+                                peer_prev_status.remove(old);
+
+                                // Close stale WebRTC connection
+                                mesh.remove_peer(old).await;
+
+                                // Notify UI
+                                let _ = app.emit("peer:left", PeerLeftEvent { peer_id: old.clone() });
+                            }
+
                             peer_identities.insert(pid.clone(), rid.clone());
 
                             // Assign slot for stream 0 (mirror recv plugin's logic for UI labeling)
