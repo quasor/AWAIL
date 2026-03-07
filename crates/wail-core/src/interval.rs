@@ -59,9 +59,13 @@ impl IntervalTracker {
     }
 
     pub fn set_config(&mut self, bars: u32, quantum: f64) {
-        self.bars = bars.max(1);
-        self.quantum = quantum.max(f64::EPSILON);
-        self.last_interval_index = None; // reset
+        let new_bars = bars.max(1);
+        let new_quantum = quantum.max(f64::EPSILON);
+        if new_bars != self.bars || (new_quantum - self.quantum).abs() > f64::EPSILON {
+            self.bars = new_bars;
+            self.quantum = new_quantum;
+            self.last_interval_index = None; // reset only on actual change
+        }
     }
 
     /// Adopt a remote interval index (NINJAM-style ground-truth sync).
@@ -124,6 +128,29 @@ mod tests {
             // Must not undo the sync
             assert_eq!(tracker.current_index(), Some(2));
         }
+    }
+
+    #[test]
+    fn set_config_does_not_reset_when_values_unchanged() {
+        let mut tracker = IntervalTracker::new(4, 4.0);
+        tracker.update(0.0); // sets last_interval_index = Some(0)
+        assert_eq!(tracker.current_index(), Some(0));
+
+        // Call set_config with same values — should NOT reset
+        tracker.set_config(4, 4.0);
+        assert_eq!(
+            tracker.current_index(),
+            Some(0),
+            "set_config with same values must not reset last_interval_index"
+        );
+
+        // Call set_config with different values — SHOULD reset
+        tracker.set_config(2, 4.0);
+        assert_eq!(
+            tracker.current_index(),
+            None,
+            "set_config with new bars must reset last_interval_index"
+        );
     }
 
     #[test]

@@ -285,6 +285,18 @@ impl Plugin for WailRecvPlugin {
         };
         self.cumulative_samples += num_samples as u64;
 
+        // Sampled diagnostic: log beat position every ~2 seconds (96000 samples at 48kHz)
+        if self.cumulative_samples % 96000 < num_samples as u64 {
+            let interval_index = (beat_position / (DEFAULT_BARS as f64 * DEFAULT_QUANTUM)).floor() as i64;
+            tracing::debug!(
+                beat = format!("{:.2}", beat_position),
+                bpm = format!("{:.1}", bpm),
+                interval = interval_index,
+                playing = transport.playing,
+                "RECV beat"
+            );
+        }
+
         if let Ok(mut bridge_guard) = self.bridge.try_lock() {
             if let Some(ref mut bridge) = *bridge_guard {
                 bridge.update_config(
