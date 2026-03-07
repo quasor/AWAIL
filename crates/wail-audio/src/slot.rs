@@ -171,6 +171,23 @@ impl SlotTable {
         reclaimed
     }
 
+    /// Re-key all active and reserved mappings from `old_client_id` to
+    /// `new_client_id`, preserving slot assignments. Used when a peer's
+    /// persistent identity becomes known after slots were already assigned
+    /// under a fallback key.
+    pub fn rekey_client(&mut self, old_client_id: &str, new_client_id: &str) {
+        for (mapping, _) in &mut self.active {
+            if mapping.client_id == old_client_id {
+                mapping.client_id = new_client_id.to_string();
+            }
+        }
+        for (mapping, _) in &mut self.reserved {
+            if mapping.client_id == old_client_id {
+                mapping.client_id = new_client_id.to_string();
+            }
+        }
+    }
+
     fn lookup_active(&self, mapping: &ClientChannelMapping) -> Option<usize> {
         self.active
             .iter()
@@ -323,5 +340,39 @@ mod tests {
 
         // Alice reconnects — slot 0 is taken, falls through to next free
         assert_eq!(table.assign(&alice), Some(1));
+    }
+
+    #[test]
+    fn rekey_client_preserves_slot() {
+        let mut table = SlotTable::new();
+        // Assign under fallback peer_id key
+        let fallback = mapping("peer-abc", 0);
+        assert_eq!(table.assign(&fallback), Some(0));
+
+        // Identity becomes known — re-key to persistent UUID
+        table.rekey_client("peer-abc", "uuid-alice");
+
+        // The slot is now accessible under the new key
+        let real = mapping("uuid-alice", 0);
+        assert_eq!(table.slot_for(&real), Some(0));
+        // Old key no longer resolves
+        assert_eq!(table.slot_for(&fallback), None);
+        // Only one slot occupied
+        assert_eq!(table.active_mappings().len(), 1);
+    }
+
+    #[test]
+    fn rekey_client_works_for_reserved() {
+        let mut table = SlotTable::new();
+        let fallback = mapping("peer-abc", 0);
+        assert_eq!(table.assign(&fallback), Some(0));
+        table.release(&fallback);
+
+        // Re-key while reserved
+        table.rekey_client("peer-abc", "uuid-alice");
+
+        // Reclaim under the new key
+        let real = mapping("uuid-alice", 0);
+        assert_eq!(table.assign(&real), Some(0));
     }
 }

@@ -385,6 +385,10 @@ impl IntervalRing {
         self.peer_identity_map.retain(|(pid, _)| pid != peer_id);
         self.peer_identity_map.push((peer_id.to_string(), identity.to_string()));
 
+        // Re-key any active slots assigned under the fallback peer_id key
+        // (happens when audio arrived before identity was known)
+        self.slot_table.rekey_client(peer_id, identity);
+
         // Reclaim any reserved slots for this identity
         let reclaimed = self.slot_table.reclaim_reserved_for_client(identity);
         for (stream_id, slot_idx) in reclaimed {
@@ -1676,5 +1680,43 @@ mod tests {
 
         assert_eq!(new_a, slot_a, "peer-a-new reclaims peer-a's original slot");
         assert_eq!(new_b, slot_b, "peer-b is unaffected by peer-a's reconnect");
+    }
+
+    /// Audio arriving before identity is known should not leak a slot when
+    /// notify_peer_joined later provides the real identity.
+    #[test]
+    fn audio_before_identity_rekeys_slot() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // Audio arrives before Hello — identity unknown, slot assigned under peer_id
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a".to_string(), 0, 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let slot_before = ring.active_peer_slots()
+            .iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+
+        // Hello arrives — identity becomes known
+        ring.notify_peer_joined("peer-a", "identity-alice");
+
+        // Next audio uses the real identity key
+        ring.feed_remote("peer-a".to_string(), 0, 1, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        let active = ring.active_peer_slots();
+        let slot_after = active.iter()
+            .find(|(_, pid, _)| pid == "peer-a")
+            .unwrap()
+            .0;
+
+        // Same slot — no double-allocation
+        assert_eq!(slot_before, slot_after,
+            "Slot should be re-keyed, not duplicated");
+        assert_eq!(active.len(), 1, "Only one active slot should exist");
     }
 }

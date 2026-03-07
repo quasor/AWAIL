@@ -81,9 +81,8 @@ impl PeerRegistry {
     /// the same peer can reclaim the same slot on rejoin.
     pub fn remove(&mut self, peer_id: &str) {
         if let Some(peer) = self.peers.remove(peer_id) {
-            if let Some(ref identity) = peer.identity {
-                self.slots.release_all_for_client(identity);
-            }
+            let client_id = peer.identity.as_deref().unwrap_or(peer_id);
+            self.slots.release_all_for_client(client_id);
         }
     }
 
@@ -288,6 +287,19 @@ mod tests {
         reg.remove("peer1");
         assert!(!reg.slots.is_occupied(0));
         assert!(reg.get("peer1").is_none());
+    }
+
+    #[test]
+    fn remove_peer_without_identity_frees_slot() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer1".to_string(), Some("Anon".to_string()));
+        // No identity set — peer.identity remains None
+        let slot = reg.assign_slot("peer1", 0).unwrap();
+        assert_eq!(slot, 0);
+        assert!(reg.slots.is_occupied(0));
+
+        reg.remove("peer1");
+        assert!(!reg.slots.is_occupied(0), "Slot must be freed even without identity");
     }
 
     #[test]
