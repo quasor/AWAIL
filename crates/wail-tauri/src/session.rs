@@ -695,6 +695,13 @@ async fn session_loop(
                                 let msg = IpcMessage::encode_peer_joined(&pid, rid);
                                 let frame = IpcFramer::encode_frame(&msg);
                                 ipc_pool.broadcast(&frame).await;
+
+                                // Send display name so the plugin can rename DAW aux ports
+                                if let Some(ref display_name) = name {
+                                    let name_msg = IpcMessage::encode_peer_name(&pid, display_name);
+                                    let name_frame = IpcFramer::encode_frame(&name_msg);
+                                    ipc_pool.broadcast(&name_frame).await;
+                                }
                             }
                         }
 
