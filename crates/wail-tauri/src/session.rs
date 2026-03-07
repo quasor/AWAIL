@@ -688,6 +688,11 @@ async fn session_loop(
                             if let Some(peer) = peers.get_mut(&pid) {
                                 peer.identity = Some(rid.clone());
                             }
+                            // Migrate any slots assigned under peer_id (fallback) before Hello
+                            // arrived — audio DC and sync DC have independent ordering so audio
+                            // can arrive before Hello, causing slots to be keyed by peer_id
+                            // instead of the persistent identity UUID.
+                            peers.rekey_peer_slots(&pid, rid);
 
                             // Assign slot for stream 0 (mirror recv plugin's logic for UI labeling)
                             let already_had_slot = peers.slot_for(&pid, 0).is_some();

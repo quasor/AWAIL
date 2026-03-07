@@ -184,6 +184,13 @@ impl PeerRegistry {
         }
     }
 
+    /// Re-key all slots assigned under `peer_id` (fallback) to use `identity` (persistent UUID).
+    /// Call after setting peer.identity in the Hello handler to fix slots that were assigned
+    /// via the audio DataChannel before Hello arrived on the sync DataChannel.
+    pub fn rekey_peer_slots(&mut self, peer_id: &str, identity: &str) {
+        self.slots.rekey_client(peer_id, identity);
+    }
+
     /// Find the peer_id of a peer with the given identity, if any.
     pub fn find_by_identity(&self, identity: &str) -> Option<String> {
         self.peers
@@ -393,6 +400,24 @@ mod tests {
 
         reg.clear_hello_sent("peer1");
         assert!(reg.mark_hello_sent("peer1")); // after clear → true again
+    }
+
+    #[test]
+    fn rekey_peer_slots_fixes_audio_before_hello_race() {
+        let mut reg = PeerRegistry::new();
+        // Peer joins; no identity yet (Hello not received)
+        reg.add("peer1".to_string(), None);
+
+        // Audio arrives before Hello — slot assigned under peer_id as client_id
+        let slot = reg.assign_slot("peer1", 0).unwrap();
+        assert_eq!(slot, 0);
+
+        // Hello arrives — identity now known; rekey fixes the slot
+        reg.get_mut("peer1").unwrap().identity = Some("uuid-alice".to_string());
+        reg.rekey_peer_slots("peer1", "uuid-alice");
+
+        // find_by_identity should now resolve the peer
+        assert_eq!(reg.find_by_identity("uuid-alice"), Some("peer1".to_string()));
     }
 
     #[test]
