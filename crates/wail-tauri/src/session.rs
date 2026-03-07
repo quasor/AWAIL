@@ -14,8 +14,10 @@ use wail_net::PeerMesh;
 
 use crate::events::*;
 use crate::emit_log;
+use crate::emit_peer_log;
 use crate::peers::{IpcWriterPool, PeerRegistry};
 use crate::recorder::{RecordingConfig, SessionRecorder};
+use crate::wslog::WsLogHandle;
 
 /// Shorthand: log to tracing + emit to UI
 macro_rules! ui_info {
@@ -277,6 +279,10 @@ async fn session_loop(
     // Non-blocking signaling reconnection state (None = connected)
     let mut signaling_reconnect: Option<SignalingReconnect> = None;
 
+    // Peer log streaming: subscribe to the broadcast channel for forwarding to signaling.
+    let ws_log_handle = app.state::<WsLogHandle>().inner().clone();
+    let mut log_rx = ws_log_handle.subscribe();
+
     ui_info!(&app, "Waiting for peers...");
 
     loop {
@@ -309,6 +315,11 @@ async fn session_loop(
                         break;
                     }
                 }
+            }
+
+            // --- Outgoing peer log broadcast ---
+            Ok(entry) = log_rx.recv(), if ws_log_handle.is_enabled() && signaling_reconnect.is_none() => {
+                mesh.send_log(&entry.level, &entry.target, &entry.message, entry.timestamp_us);
             }
 
             // --- Accept plugin IPC connection ---
@@ -520,6 +531,12 @@ async fn session_loop(
                             ui_info!(&app, "First peer in room — audio send ungated");
                         } else {
                             ui_info!(&app, "Joined room with {n} peer(s) — audio send gated until beat sync");
+                        }
+                    }
+                    Ok(Some(wail_net::MeshEvent::PeerLogBroadcast { from, level, message, .. })) => {
+                        if ws_log_handle.is_enabled() {
+                            let peer_name = peers.get(&from).and_then(|p| p.display_name.clone());
+                            emit_peer_log(&app, &from, peer_name, &level, message);
                         }
                     }
                     Ok(Some(_)) => {}
