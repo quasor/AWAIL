@@ -11,10 +11,13 @@ pub struct PeerSlot {
     /// When true, the next interval from this peer will be faded in
     /// from silence to prevent pops/clicks on join or reconnect.
     needs_fade_in: bool,
+    /// Saved tail of the outgoing interval for crossfade at next boundary.
+    /// Pre-allocated to `fade_in_samples` capacity.
+    crossfade_tail: Vec<f32>,
 }
 
 impl PeerSlot {
-    fn new() -> Self {
+    fn new(fade_capacity: usize) -> Self {
         Self {
             peer_id: String::new(),
             stream_id: 0,
@@ -22,6 +25,7 @@ impl PeerSlot {
             active: false,
             read_pos: 0,
             needs_fade_in: true,
+            crossfade_tail: Vec::with_capacity(fade_capacity),
         }
     }
 
@@ -30,6 +34,7 @@ impl PeerSlot {
         self.active = false;
         self.read_pos = 0;
         self.needs_fade_in = true;
+        self.crossfade_tail.clear();
     }
 }
 
@@ -102,6 +107,9 @@ pub struct IntervalRing {
     /// Affinity reservations: (identity, stream_id) → slot_index for peers that left.
     /// When a peer with matching identity rejoins, they reclaim their old slot.
     affinity_map: Vec<((String, u16), usize)>,
+    /// Saved tail of the outgoing summed playback for crossfade at next boundary.
+    /// Pre-allocated to `fade_in_samples` capacity.
+    playback_crossfade_tail: Vec<f32>,
 }
 
 /// A completed local recording ready for encoding.
@@ -139,7 +147,7 @@ impl IntervalRing {
 
         let mut peer_slots = Vec::with_capacity(MAX_REMOTE_PEERS);
         for _ in 0..MAX_REMOTE_PEERS {
-            peer_slots.push(PeerSlot::new());
+            peer_slots.push(PeerSlot::new(fade_in_samples));
         }
 
         Self {
@@ -163,6 +171,7 @@ impl IntervalRing {
             peer_slot_map: Vec::with_capacity(MAX_REMOTE_PEERS),
             peer_identity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
             affinity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
+            playback_crossfade_tail: Vec::with_capacity(fade_in_samples),
         }
     }
 
@@ -295,6 +304,7 @@ impl IntervalRing {
         self.current_interval = None;
         self.completed.clear();
         self.pending_remote.clear();
+        self.playback_crossfade_tail.clear();
         for slot in &mut self.peer_slots {
             slot.clear();
         }
@@ -525,6 +535,37 @@ impl IntervalRing {
         }
         self.record_pos = 0;
 
+        // Save tail of each active peer slot for crossfade.
+        // Per-peer tails are saved first so the summed tail can be derived from them,
+        // ensuring removed peers don't contribute to the summed crossfade.
+        for slot in &mut self.peer_slots {
+            slot.crossfade_tail.clear();
+            if slot.active && !slot.samples.is_empty() {
+                let tail_start = slot.samples.len().saturating_sub(self.fade_in_samples);
+                slot.crossfade_tail
+                    .extend_from_slice(&slot.samples[tail_start..]);
+            }
+        }
+
+        // Compute summed crossfade tail from per-peer tails (not from playback_slot).
+        // This ensures removed peers' audio is excluded from the summed crossfade.
+        self.playback_crossfade_tail.clear();
+        let max_tail_len = self
+            .peer_slots
+            .iter()
+            .map(|s| s.crossfade_tail.len())
+            .max()
+            .unwrap_or(0);
+        if max_tail_len > 0 {
+            // resize within pre-allocated capacity — no heap alloc
+            self.playback_crossfade_tail.resize(max_tail_len, 0.0);
+            for slot in &self.peer_slots {
+                for (i, &s) in slot.crossfade_tail.iter().enumerate() {
+                    self.playback_crossfade_tail[i] += s;
+                }
+            }
+        }
+
         // Clear per-peer slots (but keep assignments)
         for slot in &mut self.peer_slots {
             slot.samples.clear();
@@ -603,6 +644,24 @@ impl IntervalRing {
                 }
             }
         }
+        // Apply crossfade: blend saved tail (fading out) with new head (fading in)
+        let xfade_len = self.playback_crossfade_tail.len().min(self.playback_len);
+        for i in 0..xfade_len {
+            let s = (i + 1) as f32 / xfade_len as f32;
+            self.playback_slot[i] =
+                self.playback_slot[i] * s + self.playback_crossfade_tail[i] * (1.0 - s);
+        }
+
+        // Apply crossfade to per-peer slots (skip if tail is empty — peer just joined)
+        for slot in &mut self.peer_slots {
+            let xfade_len = slot.crossfade_tail.len().min(slot.samples.len());
+            for i in 0..xfade_len {
+                let s = (i + 1) as f32 / xfade_len as f32;
+                slot.samples[i] =
+                    slot.samples[i] * s + slot.crossfade_tail[i] * (1.0 - s);
+            }
+        }
+
         // Put the drained (empty but with capacity) Vec back
         self.pending_remote = pending;
     }
@@ -804,17 +863,18 @@ mod tests {
     #[test]
     fn multiple_interval_cycle() {
         let mut ring = make_ring();
-        let buf = FADE_LEN + 64;
-        let ones = vec![1.0f32; buf];
-        let twos = vec![2.0f32; buf];
-        let mut output = vec![0.0f32; buf];
+        let read_buf = FADE_LEN + 64;
+        let long_buf = FADE_LEN * 2 + 64;
+        let ones = vec![1.0f32; read_buf];
+        let twos = vec![2.0f32; read_buf];
+        let mut output = vec![0.0f32; read_buf];
 
         // Interval 0: record ones
         ring.process(&ones, &mut output, 0.0);
         ring.process(&ones, &mut output, 8.0);
 
-        // Feed remote for playback in interval 1
-        ring.feed_remote("peer-a".into(), 0, 0, vec![0.9f32; buf]);
+        // Feed remote for playback in interval 1 (long so tail is full amplitude)
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.9f32; long_buf]);
 
         // Interval 1: record twos, play remote (first interval = faded)
         ring.process(&twos, &mut output, 16.0);
@@ -824,8 +884,11 @@ mod tests {
         // First interval from peer-a is faded — check post-fade
         assert!((output[FADE_LEN] - 0.9).abs() < f32::EPSILON);
 
+        // Drain remaining playback so tail is at full amplitude
+        ring.process(&twos, &mut output, 16.5);
+
         // Feed new remote for interval 2
-        ring.feed_remote("peer-a".into(), 0, 1, vec![0.6f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.6f32; read_buf]);
 
         // Interval 2: record ones, play new remote
         ring.process(&ones, &mut output, 32.0);
@@ -834,8 +897,14 @@ mod tests {
         assert_eq!(completed[0].index, 1);
         // Completed interval 1 should contain twos
         assert!((completed[0].samples[0] - 2.0).abs() < f32::EPSILON);
-        // Second interval from same peer should NOT be faded
-        assert!((output[0] - 0.6).abs() < f32::EPSILON);
+        // Second interval from same peer: crossfaded (tail=0.9, head=0.6)
+        // First sample: s=1/FADE_LEN, output ≈ 0.6*s + 0.9*(1-s) ≈ 0.9
+        let s = 1.0 / FADE_LEN as f32;
+        let expected = 0.6 * s + 0.9 * (1.0 - s);
+        assert!((output[0] - expected).abs() < 0.01,
+            "Should be crossfaded, got: {}, expected ~{expected}", output[0]);
+        // Post-crossfade: pure 0.6
+        assert!((output[FADE_LEN] - 0.6).abs() < f32::EPSILON);
     }
 
     // --- Test: Configuration ---
@@ -1422,46 +1491,59 @@ mod tests {
     }
 
     #[test]
-    fn no_fade_on_second_interval_from_same_peer() {
+    fn no_fade_in_on_second_interval_but_crossfade_applied() {
         let mut ring = make_ring();
-        let buf = FADE_LEN + 64;
-        let input = vec![0.0f32; buf];
-        let mut output = vec![0.0f32; buf];
+        // Long first interval so tail is at full amplitude
+        let long_buf = FADE_LEN * 2 + 64;
+        let read_buf = FADE_LEN + 64;
+        let input = vec![0.0f32; read_buf];
+        let mut output = vec![0.0f32; read_buf];
 
         ring.process(&input, &mut output, 0.0);
 
-        // First interval from peer — will be faded
-        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; buf]);
+        // First interval from peer — will be faded from silence
+        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; long_buf]);
         ring.process(&input, &mut output, 16.0);
         assert!(output[0].abs() < f32::EPSILON, "First interval should be faded");
+        ring.process(&input, &mut output, 16.5); // drain remaining
 
         // Feed second interval from same peer
-        ring.feed_remote("peer-a".into(), 0, 1, vec![0.8f32; buf]);
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.8f32; read_buf]);
         ring.process(&input, &mut output, 32.0);
 
-        // Second interval should NOT be faded — first sample at full amplitude
-        assert!((output[0] - 0.8).abs() < f32::EPSILON,
-            "Second interval should NOT be faded, got: {}", output[0]);
+        // Second interval is NOT fade-in-from-silence, but IS crossfaded with
+        // the tail of the first interval (1.0 → 0.8).
+        // First sample: s = 1/FADE_LEN, output ≈ 0.8 * s + 1.0 * (1-s) ≈ 1.0
+        let s = 1.0 / FADE_LEN as f32;
+        let expected = 0.8 * s + 1.0 * (1.0 - s);
+        assert!((output[0] - expected).abs() < 0.01,
+            "Second interval should be crossfaded, got: {}, expected ~{expected}", output[0]);
+
+        // Post-crossfade: pure 0.8
+        assert!((output[FADE_LEN] - 0.8).abs() < f32::EPSILON,
+            "Post-crossfade should be 0.8, got: {}", output[FADE_LEN]);
     }
 
     #[test]
     fn fade_in_applied_on_reconnect_via_affinity() {
         let mut ring = make_ring();
-        let buf = FADE_LEN + 64;
-        let input = vec![0.0f32; buf];
-        let mut output = vec![0.0f32; buf];
+        let long_buf = FADE_LEN * 2 + 64;
+        let read_buf = FADE_LEN + 64;
+        let input = vec![0.0f32; read_buf];
+        let mut output = vec![0.0f32; read_buf];
 
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.process(&input, &mut output, 0.0);
 
-        // First interval — faded
-        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; buf]);
+        // First interval — faded (long so tail is at full amplitude)
+        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; long_buf]);
         ring.process(&input, &mut output, 16.0);
+        ring.process(&input, &mut output, 16.5); // drain remaining
 
-        // Second interval — not faded (steady state)
-        ring.feed_remote("peer-a".into(), 0, 1, vec![1.0f32; buf]);
+        // Second interval — crossfaded (1.0 → 1.0 = still 1.0)
+        ring.feed_remote("peer-a".into(), 0, 1, vec![1.0f32; read_buf]);
         ring.process(&input, &mut output, 32.0);
-        assert!((output[0] - 1.0).abs() < f32::EPSILON, "Steady state should not be faded");
+        assert!((output[0] - 1.0).abs() < f32::EPSILON, "Steady state crossfade 1.0→1.0 should be 1.0");
 
         // Disconnect
         ring.remove_peer("peer-a");
@@ -1469,8 +1551,9 @@ mod tests {
         // Reconnect with new peer_id, same identity
         ring.notify_peer_joined("peer-a-new", "identity-alice");
 
-        // First interval after reconnect — should be faded again
-        ring.feed_remote("peer-a-new".into(), 0, 2, vec![1.0f32; buf]);
+        // First interval after reconnect — should be faded from silence again
+        // (crossfade_tail was cleared by remove_peer → clear())
+        ring.feed_remote("peer-a-new".into(), 0, 2, vec![1.0f32; read_buf]);
         ring.process(&input, &mut output, 48.0);
 
         assert!(output[0].abs() < f32::EPSILON,
@@ -1539,6 +1622,152 @@ mod tests {
             "Last sample should be ~{expected_last}, got: {}", output[31]);
         // Silence after audio
         assert_eq!(output[32], 0.0);
+    }
+
+    // --- Test: Crossfade at interval boundaries ---
+
+    #[test]
+    fn crossfade_at_steady_state_boundary() {
+        let mut ring = make_ring();
+        // Use long buffers so the first interval's tail is entirely past the fade region
+        let long_buf = FADE_LEN * 2 + 64;
+        let read_buf = FADE_LEN + 64;
+        let input = vec![0.0f32; read_buf];
+        let mut output = vec![0.0f32; read_buf];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // First interval from peer — faded from silence (no crossfade tail yet)
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.8f32; long_buf]);
+        ring.process(&input, &mut output, 16.0);
+        // Drain remaining playback from first interval
+        ring.process(&input, &mut output, 16.5);
+
+        // Second interval — crossfade from 0.8 tail to 0.4 head
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.4f32; read_buf]);
+        ring.process(&input, &mut output, 32.0);
+
+        // Tail is at full amplitude 0.8 (long enough to be past fade region)
+        // First sample: s = 1/FADE_LEN, output = 0.4 * s + 0.8 * (1-s) ≈ 0.8
+        let s = 1.0 / FADE_LEN as f32;
+        let expected_first = 0.4 * s + 0.8 * (1.0 - s);
+        assert!(
+            (output[0] - expected_first).abs() < 0.01,
+            "First sample should be crossfaded ~{expected_first}, got: {}",
+            output[0]
+        );
+
+        // Mid-crossfade: s ≈ 0.5
+        let mid = FADE_LEN / 2;
+        let expected_mid = 0.4 * 0.5 + 0.8 * 0.5;
+        assert!(
+            (output[mid] - expected_mid).abs() < 0.01,
+            "Mid-crossfade should be ~{expected_mid}, got: {}",
+            output[mid]
+        );
+
+        // Post-crossfade: pure new audio
+        assert!(
+            output[FADE_LEN..].iter().all(|&s| (s - 0.4).abs() < f32::EPSILON),
+            "Post-crossfade should be 0.4, got: {:?}",
+            &output[FADE_LEN..FADE_LEN + 4]
+        );
+    }
+
+    #[test]
+    fn crossfade_per_peer_slot_matches_summed() {
+        let mut ring = make_ring();
+        let long_buf = FADE_LEN * 2 + 64;
+        let read_buf = FADE_LEN + 64;
+        let input = vec![0.0f32; read_buf];
+        let mut output = vec![0.0f32; read_buf];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Two peers, first interval (faded from silence, long enough for tail to be full amp)
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.3f32; long_buf]);
+        ring.feed_remote("peer-b".into(), 0, 0, vec![0.5f32; long_buf]);
+        ring.process(&input, &mut output, 16.0);
+        ring.process(&input, &mut output, 16.5); // drain remaining
+
+        // Second interval — crossfade for both peers
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.6f32; read_buf]);
+        ring.feed_remote("peer-b".into(), 0, 1, vec![0.2f32; read_buf]);
+        ring.process(&input, &mut output, 32.0);
+
+        // Sum per-peer slots
+        let active = ring.active_peer_slots();
+        let mut sum = vec![0.0f32; read_buf];
+        for (idx, _, _) in &active {
+            let mut peer_buf = vec![0.0f32; read_buf];
+            ring.read_peer_playback(*idx, &mut peer_buf);
+            for (i, s) in peer_buf.iter().enumerate() {
+                sum[i] += s;
+            }
+        }
+
+        // Per-peer sum should match summed output
+        for i in 0..read_buf {
+            assert!(
+                (sum[i] - output[i]).abs() < 0.001,
+                "Per-peer sum at {i} = {}, expected {}",
+                sum[i],
+                output[i]
+            );
+        }
+    }
+
+    #[test]
+    fn no_crossfade_on_first_interval_from_new_peer() {
+        let mut ring = make_ring();
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // First interval from a brand new peer — should fade from silence, not crossfade
+        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; buf]);
+        ring.process(&input, &mut output, 16.0);
+
+        // First sample should be ~0.0 (faded from silence)
+        assert!(
+            output[0].abs() < f32::EPSILON,
+            "First interval should fade from silence, got: {}",
+            output[0]
+        );
+        // Post-fade should be full amplitude
+        assert!(
+            (output[FADE_LEN] - 1.0).abs() < f32::EPSILON,
+            "Post-fade should be 1.0, got: {}",
+            output[FADE_LEN]
+        );
+    }
+
+    #[test]
+    fn crossfade_preserves_silence_when_no_remote() {
+        let mut ring = make_ring();
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // First interval with audio
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; buf]);
+        ring.process(&input, &mut output, 16.0);
+
+        // Second interval — no remote audio. The crossfade tail fades out to silence.
+        ring.process(&input, &mut output, 32.0);
+
+        // The tail should fade out (no new audio to blend with).
+        // playback_len = 0, so xfade_len = min(tail.len(), 0) = 0, no crossfade applied.
+        // Output is silence because playback_len = 0.
+        assert!(
+            output.iter().all(|&s| s == 0.0),
+            "No remote audio should produce silence, got: {:?}",
+            &output[..4]
+        );
     }
 
     // --- Tests: reconnect with same peer_id (WebRTC-level reconnect, no new peer_id) ---
