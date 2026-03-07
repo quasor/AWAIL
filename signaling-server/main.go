@@ -117,6 +117,11 @@ func (h *hub) join(c *conn, msg clientMsg) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Leave previous room if already joined (prevents stale references on double-join)
+	if c.room != "" {
+		h.leaveUnlocked(c)
+	}
+
 	room := msg.Room
 	peerID := msg.PeerID
 	streamCount := msg.StreamCount
@@ -234,13 +239,13 @@ func (h *hub) signal(c *conn, msg clientMsg) {
 			raw, _ := json.Marshal(map[string]any{
 				"type":    "signal",
 				"to":      msg.To,
-				"from":    msg.From,
+				"from":    c.peerID,
 				"payload": msg.Payload,
 			})
 			select {
 			case target.send <- raw:
 			default:
-				// Drop if send buffer full
+				log.Printf("warn: dropped signal from %s to %s (send buffer full)", c.peerID, msg.To)
 			}
 		}
 	}
@@ -249,7 +254,11 @@ func (h *hub) signal(c *conn, msg clientMsg) {
 func (h *hub) leave(c *conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.leaveUnlocked(c)
+}
 
+// leaveUnlocked removes c from its current room. Caller must hold h.mu.
+func (h *hub) leaveUnlocked(c *conn) {
 	if c.room == "" {
 		return
 	}
@@ -290,11 +299,13 @@ func (h *hub) leave(c *conn) {
 func (c *conn) sendJSON(v any) {
 	raw, err := json.Marshal(v)
 	if err != nil {
+		log.Printf("warn: sendJSON marshal error for peer %s: %v", c.peerID, err)
 		return
 	}
 	select {
 	case c.send <- raw:
 	default:
+		log.Printf("warn: dropped message to peer %s (send buffer full)", c.peerID)
 	}
 }
 
@@ -403,6 +414,13 @@ func handleRooms(h *hub, w http.ResponseWriter, r *http.Request) {
 
 	var result []roomInfo
 	for roomName, conns := range h.rooms {
+		// Skip password-protected rooms (they are private)
+		var pwHash sql.NullString
+		h.db.QueryRow("SELECT password_hash FROM rooms WHERE room = ?", roomName).Scan(&pwHash)
+		if pwHash.Valid && pwHash.String != "" {
+			continue
+		}
+
 		var createdAt int64
 		h.db.QueryRow("SELECT created_at FROM rooms WHERE room = ?", roomName).Scan(&createdAt)
 
