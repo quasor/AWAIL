@@ -518,6 +518,7 @@ impl IntervalRing {
 
         // Take pending_remote, drain it (preserving capacity), then put it back.
         let mut pending = std::mem::take(&mut self.pending_remote);
+        let pending_count = pending.len();
         for mut remote in pending.drain(..) {
             // Assign slot FIRST so we can check needs_fade_in before summing
             let slot_assignment = self.assign_peer_slot(&remote.peer_id, remote.stream_id);
@@ -593,6 +594,22 @@ impl IntervalRing {
         }
         // Put the drained (empty but with capacity) Vec back
         self.pending_remote = pending;
+
+        // Diagnostic: log boundary swap details to identify gap root cause
+        let active_peers: Vec<_> = self.peer_slots.iter()
+            .filter(|s| s.active)
+            .map(|s| {
+                let tail_nonzero = s.crossfade_tail.iter().any(|&v| v != 0.0);
+                format!("{}:{} len={} tail={}", s.peer_id, s.stream_id, s.samples.len(), if tail_nonzero { "audio" } else { "zero" })
+            })
+            .collect();
+        tracing::info!(
+            completed_index = completed_index,
+            pending_count = pending_count,
+            playback_len = self.playback_len,
+            peers = ?active_peers,
+            "INTERVAL SWAP"
+        );
     }
 }
 
