@@ -304,11 +304,19 @@ impl Plugin for WailRecvPlugin {
                                     bridge.remove_peer(&peer_id);
                                 }
                                 PeerEvent::NameChanged { peer_id, display_name } => {
-                                    // Find the slot for this peer and update the port name
-                                    if let Some((slot, _, _)) = bridge.peer_info().iter()
-                                        .find(|(_, pid, _)| *pid == peer_id)
-                                    {
-                                        context.set_aux_output_name(*slot, Some(display_name));
+                                    // Rename all slots for this peer (may have multiple streams)
+                                    let slots: Vec<(usize, u16)> = bridge.peer_info().iter()
+                                        .filter(|(_, pid, _)| *pid == peer_id)
+                                        .map(|(slot, _, stream_id)| (*slot, *stream_id))
+                                        .collect();
+                                    let multi = slots.len() > 1;
+                                    for (slot, stream_id) in slots {
+                                        let name = if multi {
+                                            format!("{} {}", display_name, stream_id + 1)
+                                        } else {
+                                            display_name.clone()
+                                        };
+                                        context.set_aux_output_name(slot, Some(name));
                                         port_names_dirty = true;
                                     }
                                 }
