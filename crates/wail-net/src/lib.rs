@@ -547,27 +547,37 @@ impl PeerMesh {
         display_name: Option<&str>,
         new_ice_servers: Vec<RTCIceServer>,
     ) -> Result<HashMap<String, Option<String>>> {
-        let (mut new_signaling, initial_peer_names) = SignalingClient::connect_with_options(
+        let (new_signaling, initial_peer_names) = SignalingClient::connect_with_options(
             server_url, room, &self.peer_id, password, self.stream_count, display_name,
         ).await?;
 
-        // The SignalingClient pushed a PeerList as its first message.
-        // Consume it here: only initiate connections for peers we don't already have.
-        if let Some(SignalMessage::PeerList { peers }) = new_signaling.incoming_rx.recv().await {
-            for remote_id in peers {
-                if remote_id != self.peer_id
-                    && self.peer_id < remote_id
-                    && !self.peers.contains_key(&remote_id)
-                {
-                    self.initiate_connection(&remote_id).await?;
-                }
-            }
-        }
-
-        // Update ICE servers for any future connections (e.g. new peers joining).
+        // Replace signaling BEFORE processing the PeerList so that
+        // initiate_connection() sends SDP offers via the new WebSocket.
         self.ice_servers = new_ice_servers;
         self.signaling = new_signaling;
         self.initial_peer_names = initial_peer_names.clone();
+
+        // The SignalingClient pushed a PeerList as its first message.
+        // Consume it here: only initiate connections for peers we don't already have.
+        match self.signaling.incoming_rx.recv().await {
+            Some(SignalMessage::PeerList { peers }) => {
+                for remote_id in peers {
+                    if remote_id != self.peer_id
+                        && self.peer_id < remote_id
+                        && !self.peers.contains_key(&remote_id)
+                    {
+                        self.initiate_connection(&remote_id).await?;
+                    }
+                }
+            }
+            other => {
+                warn!(
+                    "reconnect_signaling: expected PeerList as first message, got {:?}",
+                    other.as_ref().map(std::mem::discriminant)
+                );
+            }
+        }
+
         Ok(initial_peer_names)
     }
 }
