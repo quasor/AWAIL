@@ -586,6 +586,24 @@ summary {
   margin-top: 8px;
 }
 
+#session-screen {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 48px);
+}
+
+#log-toggle[open] {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#log-toggle[open] .log-list {
+  flex: 1;
+  max-height: none;
+}
+
 .log-entry {
   padding: 3px 8px;
   font-size: 11px;
