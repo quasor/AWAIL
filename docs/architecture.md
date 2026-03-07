@@ -108,20 +108,18 @@ Slot assignment uses **affinity**: when a peer disconnects, their `SlotTable` en
 
 ```
 DAW Track A
-  → WAIL Plugin A process() — IntervalRing records input samples
-  → Interval boundary fires
-  → IntervalRing.take_completed() returns raw f32 samples
-  → AudioEncoder.encode_interval() — Opus encode (960-sample frames)
-  → AudioWire.encode() — binary wire format (48-byte header + Opus data)
-  → IPC TCP frame (length-prefixed) to WAIL App A
+  → WAIL Send plugin process() — IntervalRing records input samples
+  → Opus encode each 20ms frame (960 samples)
+  → AudioFrameWire.encode() — WAIF streaming frame (21-byte header + Opus data)
+  → IPC TCP frame (length-prefixed, tag 0x05) to WAIL App A
   → WebRTC binary DataChannel "audio" to Peer B
   → WAIL App B receives
-  → IPC TCP frame to Plugin B
-  → AudioWire.decode() — parse wire header + Opus payload
+  → IPC TCP frame (tag 0x01 with peer_id) to Recv Plugin B
+  → FrameAssembler collects WAIF frames, assembles on final frame
   → AudioDecoder.decode_interval() — Opus decode to f32
   → IntervalRing.feed_remote() — queue for next playback slot
   → Next boundary: remote audio becomes playback slot
-  → WAIL Plugin B process() — IntervalRing reads playback to output
+  → WAIL Recv plugin process() — IntervalRing reads playback to output
 DAW Track B hears Peer A's previous interval
 ```
 
@@ -133,24 +131,28 @@ DAW Track B hears Peer A's previous interval
 - `receive_wire(peer_id, wire_data)` → decodes Opus, feeds to ring for playback (slot keyed by `ClientChannelMapping`)
 - `update_config(bars, quantum, bpm)` → updates interval parameters from DAW transport
 
-### Wire Format (AudioWire)
+### Wire Format (AudioFrameWire / WAIF)
 
-Binary header (48 bytes) + Opus payload:
+Streaming format: one WAIF frame per 20ms Opus packet. The final frame of an interval carries metadata so the receiver can reconstruct the full interval.
 
 ```
-[4 bytes]  magic: "WAIL"
-[1 byte]   version: 2  (v1 also accepted for backward compat, stream_id defaults to 0)
-[1 byte]   flags: bit 0 = stereo
-[2 bytes]  stream_id: u16 LE  (was reserved in v1)
+[4 bytes]  magic: "WAIF"
+[1 byte]   flags: bit 0 = stereo, bit 1 = final (last frame of interval)
+[2 bytes]  stream_id: u16 LE
 [8 bytes]  interval_index: i64 LE
+[4 bytes]  frame_number: u32 LE (0-indexed within interval)
+[2 bytes]  opus_len: u16 LE
+[N bytes]  opus_data
+
+If final flag set, append:
 [4 bytes]  sample_rate: u32 LE
-[4 bytes]  num_frames: u32 LE (source samples per channel)
+[4 bytes]  total_frames: u32 LE
 [8 bytes]  bpm: f64 LE
 [8 bytes]  quantum: f64 LE
 [4 bytes]  bars: u32 LE
-[4 bytes]  opus_data_len: u32 LE
-[N bytes]  opus_data
 ```
+
+On the receiver side, `FrameAssembler` (in `wail-audio`) collects WAIF frames keyed by `(interval_index, stream_id, peer_id)` and assembles them into the length-prefixed Opus blob format that `AudioDecoder::decode_interval` expects.
 
 ### IPC Protocol (Plugin ↔ App)
 
@@ -178,9 +180,10 @@ Message tags:
 | `0x02` | PeerJoined | `peer_id_len (1B) + peer_id + identity_len (1B) + identity` |
 | `0x03` | PeerLeft | `peer_id_len (1B) + peer_id` |
 | `0x04` | PeerName | `peer_id_len (1B) + peer_id + name_len (1B) + display_name` |
+| `0x05` | AudioFrame | `AudioFrameWire data (WAIF streaming frame)` |
 
-Plugin→App: AudioInterval with empty peer_id (local capture).
-App→Plugin: AudioInterval with peer_id identifying the remote sender; PeerJoined/PeerLeft/PeerName for peer lifecycle and display name updates.
+Send Plugin→App: AudioFrame (tag 0x05) — WAIF streaming frames with no peer_id (local capture).
+App→Recv Plugin: AudioInterval (tag 0x01) with peer_id identifying the remote sender; PeerJoined/PeerLeft/PeerName for peer lifecycle and display name updates.
 
 ## Tempo Sync Flow
 
@@ -209,7 +212,7 @@ App→Plugin: AudioInterval with peer_id identifying the remote sender; PeerJoin
 7. ICE candidates exchanged via signaling server
 8. Two DataChannels established per peer:
    - "sync": ordered, text mode (JSON SyncMessages)
-   - "audio": unordered, binary mode (AudioWire frames)
+   - "audio": unordered, binary mode (WAIF streaming frames)
 9. Signaling server exits the data path
 ```
 
@@ -245,7 +248,7 @@ Two independent time domains exist in the system:
 | `Hello` | sync | JSON | Greeting on connect |
 | `AudioCapabilities` | sync | JSON | Announce send/receive support |
 | `AudioIntervalReady` | sync | JSON | Metadata before binary audio |
-| _(binary audio)_ | audio | AudioWire | Opus-encoded interval data |
+| _(binary audio)_ | audio | WAIF (AudioFrameWire) | Opus-encoded streaming frames |
 
 ## Signaling Protocol Messages
 

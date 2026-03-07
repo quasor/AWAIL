@@ -18,8 +18,9 @@ crates/
 ├── wail-audio/          Audio encoding and intervalic ring buffer
 │   ├── codec.rs          Opus encode/decode (audiopus)
 │   ├── ring.rs           NINJAM-style interval ring buffer (record + playback)
-│   ├── interval.rs       AudioInterval type, IntervalRecorder
-│   ├── wire.rs           Binary wire format for audio over DataChannels
+│   ├── interval.rs       AudioInterval, AudioFrame, IntervalRecorder
+│   ├── wire.rs           Binary wire formats (AudioWire + WAIF AudioFrameWire)
+│   ├── frame_assembler.rs FrameAssembler: collects WAIF frames into intervals
 │   ├── bridge.rs         AudioBridge: wraps ring + Opus codec for send/recv
 │   ├── ipc.rs            IPC framing protocol (length-prefixed messages)
 │   └── pipeline.rs       Encode/decode pipeline (interval → wire → DataChannel)
@@ -125,22 +126,12 @@ cargo xtask test -- -p wail-core          # core library tests only
 cargo xtask test -- -p wail-audio         # audio tests (codec, ring buffer, wire format)
 ```
 
-Some integration tests are marked `#[ignore]` because they require external resources. Run these during local development to verify end-to-end behaviour:
-
-```sh
-# Requires internet access — hits the live Metered API and asserts valid TURN credentials are returned
-cargo xtask test -- -p wail-net -- --ignored fetch_metered_ice_servers_live
-
-# Requires coturn installed (brew install coturn) — full WebRTC path through a local TURN relay
-cargo xtask test -- -p wail-net -- --ignored two_peers_exchange_audio_via_turn
-```
-
 ## Code Conventions
 
 - Async with tokio, channels for cross-task communication
 - `tracing` for structured logging (set RUST_LOG=debug for verbose)
 - Protocol messages are JSON-serialized serde enums (tagged unions)
-- Audio messages use binary wire format (AudioWire) over DataChannels
+- Audio messages use WAIF streaming wire format (AudioFrameWire) over DataChannels
 - Echo guard pattern: suppress re-broadcast for 150ms after applying remote changes
 - wail-core has no networking dependencies (reusable from plugin)
 - wail-audio has no networking dependencies (reusable from plugin)
