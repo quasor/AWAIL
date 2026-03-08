@@ -367,9 +367,9 @@ mod tests {
     fn stale_preconnect_detects_stuck_peers() {
         let mut reg = PeerRegistry::new();
         reg.add("peer1".to_string(), None);
-        reg.get_mut("peer1").unwrap().last_seen = Instant::now() - Duration::from_secs(61);
-        // Must appear in stale_preconnect_peers (never connected, 61s old)
-        assert!(reg.stale_preconnect_peers(Duration::from_secs(60)).contains(&"peer1".to_string()));
+        reg.get_mut("peer1").unwrap().last_seen = Instant::now() - Duration::from_secs(16);
+        // Must appear in stale_preconnect_peers (never connected, 16s old)
+        assert!(reg.stale_preconnect_peers(Duration::from_secs(15)).contains(&"peer1".to_string()));
         // Must NOT appear in timed_out_peers (has never received a message)
         assert!(reg.timed_out_peers(Duration::from_secs(30)).is_empty());
     }

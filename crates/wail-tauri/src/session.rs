@@ -261,9 +261,8 @@ async fn session_loop(
 
     // Peer reconnection channels
     let (reconnect_tx, mut reconnect_rx) = mpsc::channel::<String>(16);
-    const MAX_PEER_RECONNECT_ATTEMPTS: u32 = 5;
-    const PEER_RECONNECT_BASE_MS: u64 = 2000;
-    const PEER_RECONNECT_MAX_MS: u64 = 16000;
+    const MAX_PEER_RECONNECT_ATTEMPTS: u32 = 6;
+    const PEER_RECONNECT_SCHEDULE_MS: [u64; 6] = [500, 1000, 2000, 3000, 4000, 5000];
     const SIGNALING_RECONNECT_BASE_MS: u64 = 1000;
     const SIGNALING_RECONNECT_MAX_MS: u64 = 30_000;
     const SIGNALING_RECONNECT_STALE_ATTEMPT: u32 = 10;
@@ -510,7 +509,7 @@ async fn session_loop(
                             if let Some(peer) = peers.get_mut(&pid) {
                                 peer.reconnect_pending = true;
                             }
-                            let backoff_ms = (PEER_RECONNECT_BASE_MS * 2u64.pow(attempt - 1)).min(PEER_RECONNECT_MAX_MS);
+                            let backoff_ms = PEER_RECONNECT_SCHEDULE_MS[(attempt as usize - 1).min(PEER_RECONNECT_SCHEDULE_MS.len() - 1)];
                             let slot_tag = peers.slot_for(&pid, 0)
                                 .map(|s| format!("slot={} ", s + 1))
                                 .unwrap_or_default();
@@ -1012,14 +1011,13 @@ async fn session_loop(
                 // Safety net: peers whose ICE never connected and are stuck beyond 2× the normal
                 // timeout. The PeerFailed path handles the common case (~30s ICE timeout); this
                 // catches the rare case where WebRTC never fires a Failed state at all.
-                const PRE_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+                const PRE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
                 let stale_peers = peers.stale_preconnect_peers(PRE_CONNECT_TIMEOUT);
                 for stale_id in stale_peers {
                     let name = peers.get(&stale_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&stale_id).to_string();
-                    ui_warn!(&app, "Peer {name} never connected — removing after {PRE_CONNECT_TIMEOUT:?}");
-                    remove_peer_fully(&mut peers, &mut ipc_pool, &stale_id).await;
-                    mesh.remove_peer(&stale_id).await;
-                    let _ = app.emit("peer:left", PeerLeftEvent { peer_id: stale_id });
+                    ui_warn!(&app, "Peer {name} stuck in pre-connect — forcing reconnection after {PRE_CONNECT_TIMEOUT:?}");
+                    mesh.close_peer(&stale_id).await;
+                    // close_peer triggers PeerConnectionState::Failed → failure_tx → PeerFailed handler
                 }
             }
 
