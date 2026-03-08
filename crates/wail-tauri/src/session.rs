@@ -212,6 +212,11 @@ async fn session_loop(
     let mut audio_bytes_sent: u64 = 0;
     let mut audio_intervals_sent: u64 = 0;
     let mut audio_bytes_recv: u64 = 0;
+    // Per-interval delta counters (reset at each boundary)
+    let mut interval_frames_sent: u64 = 0;
+    let mut interval_frames_recv: u64 = 0;
+    let mut interval_bytes_sent: u64 = 0;
+    let mut interval_bytes_recv: u64 = 0;
 
     // IPC: listen for plugin connections.
     // Use TcpSocket builder to set SO_REUSEADDR before binding, so that reconnecting
@@ -415,6 +420,8 @@ async fn session_loop(
                     let failed_peers = mesh.broadcast_audio(&wire_data).await;
                     audio_bytes_sent += wire_data.len() as u64;
                     audio_intervals_sent += 1;
+                    interval_bytes_sent += wire_data.len() as u64;
+                    interval_frames_sent += 1;
                     if !logged_first_frame_sent {
                         logged_first_frame_sent = true;
                         ui_info!(&app, "audio: first WAIF frame sent to peers ({} bytes, interval={:?})", wire_data.len(), interval.current_index());
@@ -839,6 +846,8 @@ async fn session_loop(
                 }
                 audio_intervals_received += 1;
                 audio_bytes_recv += data.len() as u64;
+                interval_frames_recv += 1;
+                interval_bytes_recv += data.len() as u64;
                 if logged_first_frame_recv.insert(from.clone()) {
                     info!(peer = %from, bytes = data.len(), "audio: first frame received from peer");
                 }
@@ -898,7 +907,16 @@ async fn session_loop(
                         }
 
                         if let Some(idx) = interval.update(beat) {
-                            info!(interval = idx, beat = format!("{:.1}", beat), ">>> INTERVAL BOUNDARY <<<");
+                            info!(
+                                ">>> INTERVAL {idx} <<< beat={beat:.1} \
+                                 sent={interval_frames_sent}({interval_bytes_sent}B) \
+                                 recv={interval_frames_recv}({interval_bytes_recv}B) \
+                                 total_sent={audio_intervals_sent} total_recv={audio_intervals_received}",
+                            );
+                            interval_frames_sent = 0;
+                            interval_frames_recv = 0;
+                            interval_bytes_sent = 0;
+                            interval_bytes_recv = 0;
                             if let Some(last) = last_boundary_time {
                                 let gap = last.elapsed();
                                 if test_mode {
@@ -939,7 +957,16 @@ async fn session_loop(
                         mesh.broadcast(&msg).await;
 
                         if let Some(idx) = interval.update(beat) {
-                            info!(interval = idx, beat = format!("{:.1}", beat), ">>> INTERVAL BOUNDARY <<<");
+                            info!(
+                                ">>> INTERVAL {idx} <<< beat={beat:.1} \
+                                 sent={interval_frames_sent}({interval_bytes_sent}B) \
+                                 recv={interval_frames_recv}({interval_bytes_recv}B) \
+                                 total_sent={audio_intervals_sent} total_recv={audio_intervals_received}",
+                            );
+                            interval_frames_sent = 0;
+                            interval_frames_recv = 0;
+                            interval_bytes_sent = 0;
+                            interval_bytes_recv = 0;
                             if let Some(last) = last_boundary_time {
                                 let gap = last.elapsed();
                                 if test_mode {
@@ -1126,8 +1153,8 @@ async fn session_loop(
                         recording_size_bytes: recorder.as_ref().map_or(0, |r| r.bytes_written()),
                     });
 
-                    // Log audio pipeline status every tick (visible in terminal logs)
-                    info!(
+                    // Log audio pipeline status every tick (use RUST_LOG=debug to see)
+                    debug!(
                         "[PIPELINE] sent={audio_intervals_sent} recv={audio_intervals_received} \
                          bytes_sent={audio_bytes_sent} bytes_recv={audio_bytes_recv} \
                          dc_open={dc_open} peers={} recv_plugins={} \
