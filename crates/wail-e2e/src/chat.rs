@@ -31,6 +31,19 @@ struct Args {
     /// Signaling server URL
     #[arg(long, default_value = "wss://wail-signal.fly.dev")]
     server: String,
+
+    /// Send a message and wait for a reply, then exit.
+    /// Can be specified multiple times to send multiple messages.
+    #[arg(long)]
+    send: Vec<String>,
+
+    /// How many reply messages to wait for before exiting (used with --send)
+    #[arg(long, default_value = "1")]
+    wait_replies: usize,
+
+    /// Seconds to wait for replies before timing out (used with --send)
+    #[arg(long, default_value = "60")]
+    reply_timeout: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -107,8 +120,97 @@ async fn main() -> Result<()> {
 
     // Track known peers for broadcasting
     let mut known_peers: HashMap<String, ()> = peers.iter().map(|p| (p.clone(), ())).collect();
+    let send_mode = !args.send.is_empty();
 
-    // Read stdin in a separate task
+    // Helper closure to send a text message to all known peers
+    async fn broadcast_text(
+        ws_write: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        known_peers: &HashMap<String, ()>,
+        peer_id: &str,
+        name: &str,
+        text: &str,
+    ) -> Result<()> {
+        for target in known_peers.keys() {
+            let msg = serde_json::json!({
+                "type": "signal",
+                "to": target,
+                "from": peer_id,
+                "payload": {
+                    "type": "chat",
+                    "name": name,
+                    "text": text,
+                },
+            });
+            ws_write.send(Message::Text(msg.to_string())).await?;
+        }
+        Ok(())
+    }
+
+    if send_mode {
+        // --send mode: wait for a peer if none, send messages, wait for replies, exit
+        if known_peers.is_empty() {
+            // Wait for a peer to join before sending
+            loop {
+                match ws_read.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(server_msg) = serde_json::from_str::<ServerMsg>(&text) {
+                            if let ServerMsg::PeerJoined { peer_id: rid } = server_msg {
+                                eprintln!("[{rid} joined]");
+                                known_peers.insert(rid, ());
+                                break;
+                            }
+                        }
+                    }
+                    Some(Err(_)) | None => bail!("WebSocket closed while waiting for peer"),
+                    _ => {}
+                }
+            }
+        }
+
+        // Send all messages
+        for text in &args.send {
+            broadcast_text(&mut ws_write, &known_peers, &peer_id, &args.name, text).await?;
+            eprintln!("[sent] {text}");
+        }
+
+        // Wait for replies
+        let mut replies_received = 0usize;
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(args.reply_timeout);
+
+        while replies_received < args.wait_replies {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    eprintln!("[timeout waiting for replies]");
+                    break;
+                }
+                Some(ws_msg) = ws_read.next() => {
+                    if let Ok(Message::Text(text)) = ws_msg {
+                        if let Ok(ServerMsg::Signal { payload, .. }) =
+                            serde_json::from_str::<ServerMsg>(&text)
+                        {
+                            if let (Some(name), Some(text)) = (
+                                payload.get("name").and_then(|v| v.as_str()),
+                                payload.get("text").and_then(|v| v.as_str()),
+                            ) {
+                                println!("{name}: {text}");
+                                replies_received += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return Ok(());
+    }
+
+    // Interactive stdin mode
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
         let stdin = tokio::io::stdin();
@@ -124,20 +226,7 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             Some(line) = stdin_rx.recv() => {
-                // Send to all known peers
-                for target in known_peers.keys() {
-                    let msg = serde_json::json!({
-                        "type": "signal",
-                        "to": target,
-                        "from": peer_id,
-                        "payload": {
-                            "type": "chat",
-                            "name": args.name,
-                            "text": line,
-                        },
-                    });
-                    ws_write.send(Message::Text(msg.to_string())).await?;
-                }
+                broadcast_text(&mut ws_write, &known_peers, &peer_id, &args.name, &line).await?;
             }
             Some(ws_msg) = ws_read.next() => {
                 match ws_msg {
