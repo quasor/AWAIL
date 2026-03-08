@@ -249,6 +249,11 @@ impl IpcWriterPool {
         self.writers.is_empty()
     }
 
+    /// Number of active recv plugin connections.
+    pub fn len(&self) -> usize {
+        self.writers.len()
+    }
+
     /// Broadcast a frame to all recv plugins. Dead connections are silently
     /// removed with a `warn!` log.
     pub async fn broadcast(&mut self, frame: &[u8]) {

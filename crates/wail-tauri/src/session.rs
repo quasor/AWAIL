@@ -417,11 +417,15 @@ async fn session_loop(
                     audio_intervals_sent += 1;
                     if !logged_first_frame_sent {
                         logged_first_frame_sent = true;
-                        info!("audio: first frame sent to peers");
+                        ui_info!(&app, "audio: first WAIF frame sent to peers ({} bytes, interval={:?})", wire_data.len(), interval.current_index());
                     }
                     if !failed_peers.is_empty() {
                         // Don't retry individual frames — next frame will arrive in 20ms
                         debug!("Frame send failed for {} peers", failed_peers.len());
+                    }
+                } else {
+                    if !logged_first_frame_sent {
+                        info!("IPC frame received but not an audio frame (tag=0x{:02x}, len={})", frame.first().copied().unwrap_or(0), frame.len());
                     }
                 }
             }
@@ -863,6 +867,8 @@ async fn session_loop(
                     let msg = IpcMessage::encode_audio(&from, &data);
                     let frame = IpcFramer::encode_frame(&msg);
                     ipc_pool.broadcast(&frame).await;
+                } else if audio_intervals_received <= 3 {
+                    debug!("audio from {from}: no recv plugin connected — not forwarding ({} bytes)", data.len());
                 }
             }
 
@@ -1120,9 +1126,14 @@ async fn session_loop(
                         recording_size_bytes: recorder.as_ref().map_or(0, |r| r.bytes_written()),
                     });
 
-                    if test_mode {
-                        ui_info!(&app, "[TEST] Status: sent={audio_intervals_sent} recv={audio_intervals_received} bytes_sent={audio_bytes_sent} bytes_recv={audio_bytes_recv} dc_open={dc_open} peers={}", connected.len());
-                    }
+                    // Log audio pipeline status every tick (visible in terminal logs)
+                    info!(
+                        "[PIPELINE] sent={audio_intervals_sent} recv={audio_intervals_received} \
+                         bytes_sent={audio_bytes_sent} bytes_recv={audio_bytes_recv} \
+                         dc_open={dc_open} peers={} recv_plugins={} \
+                         interval={:?} test_mode={test_mode}",
+                        connected.len(), ipc_pool.len(), interval.current_index(),
+                    );
 
                     // Broadcast audio pipeline status to remote peers
                     let status_msg = SyncMessage::AudioStatus {
