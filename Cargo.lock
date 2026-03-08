@@ -6568,8 +6568,11 @@ version = "1.10.1"
 dependencies = [
  "anyhow",
  "clap",
+ "futures-util",
+ "serde",
  "serde_json",
  "tokio 1.49.0",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "uuid",
