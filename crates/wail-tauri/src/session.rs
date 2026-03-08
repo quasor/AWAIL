@@ -191,8 +191,11 @@ async fn session_loop(
 
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
-    let mut beat_synced = false;
-    let mut audio_gate = AudioSendGate::new();
+    let mut initial_beat_synced = false;
+
+    // One-shot logging flags for audio transmission milestones
+    let mut logged_first_frame_sent = false;
+    let mut logged_first_frame_recv: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Link peer count — updated every status tick; used to gate audio when Link is not running
 
@@ -345,6 +348,7 @@ async fn session_loop(
                             let mut recv_buf = IpcRecvBuffer::new();
                             let mut buf = [0u8; 65536];
                             let mut reader = read_half;
+                            let mut logged_ipc_drop = false;
                             loop {
                                 match reader.read(&mut buf).await {
                                     Ok(0) => {
@@ -359,7 +363,10 @@ async fn session_loop(
                                                 match tx.try_send(frame) {
                                                     Ok(()) => {}
                                                     Err(mpsc::error::TrySendError::Full(_)) => {
-                                                        debug!("IPC audio channel full — dropping frame");
+                                                        if !logged_ipc_drop {
+                                                            warn!("IPC audio channel full — dropping frame (capacity=64)");
+                                                            logged_ipc_drop = true;
+                                                        }
                                                     }
                                                     Err(mpsc::error::TrySendError::Closed(_)) => return,
                                                 }
@@ -391,13 +398,13 @@ async fn session_loop(
                         debug!("audio dropped — interval not started yet (idx={:?})", interval.current_index());
                         continue;
                     }
-                    if audio_gate.is_gated() {
-                        debug!("audio dropped — send gate is closed");
-                        continue;
-                    }
                     let failed_peers = mesh.broadcast_audio(&wire_data).await;
                     audio_bytes_sent += wire_data.len() as u64;
                     audio_intervals_sent += 1;
+                    if !logged_first_frame_sent {
+                        logged_first_frame_sent = true;
+                        info!("audio: first frame sent to peers");
+                    }
                     if !failed_peers.is_empty() {
                         // Don't retry individual frames — next frame will arrive in 20ms
                         debug!("Frame send failed for {} peers", failed_peers.len());
@@ -498,15 +505,10 @@ async fn session_loop(
                         }
                     }
                     Ok(Some(wail_net::MeshEvent::PeerListReceived(n))) => {
-                        audio_gate.on_peer_list(n);
                         // Seed liveness for initial peers so the watchdog can
                         // detect peers that connect but never send any messages.
                         peers.seed_last_seen();
-                        if n == 0 {
-                            ui_info!(&app, "First peer in room — audio send ungated");
-                        } else {
-                            ui_info!(&app, "Joined room with {n} peer(s) — audio send gated until beat sync");
-                        }
+                        ui_info!(&app, "Joined room with {n} peer(s)");
                     }
                     Ok(Some(wail_net::MeshEvent::PeerLogBroadcast { from, level, message, .. })) => {
                         if ws_log_handle.is_enabled() {
@@ -595,7 +597,6 @@ async fn session_loop(
                         // Existing peers remain connected — their WebRTC DataChannels
                         // are unaffected by the signaling reconnect.
                         peers.seed_names(new_peer_names);
-                        audio_gate.on_reconnect();
                         signaling_reconnect = None;
                         ui_info!(&app, "Signaling reconnected (attempt {attempt}) — existing WebRTC connections preserved");
                         let _ = app.emit("session:reconnected", ());
@@ -765,10 +766,9 @@ async fn session_loop(
                     }
 
                     SyncMessage::StateSnapshot { bpm: remote_bpm, beat: remote_beat, .. } => {
-                        if !beat_synced {
-                            beat_synced = true;
-                            audio_gate.on_beat_synced();
-                            ui_info!(&app, "Beat sync — snapped to beat {remote_beat:.2} — audio send gate lifted");
+                        if !initial_beat_synced {
+                            initial_beat_synced = true;
+                            ui_info!(&app, "Beat sync — snapped to beat {remote_beat:.2}");
                             if link_cmd_tx.send(LinkCommand::ForceBeat(remote_beat)).is_err() {
                                 ui_warn!(&app, "Link bridge stopped — cannot force beat");
                             }
@@ -821,6 +821,9 @@ async fn session_loop(
                 }
                 audio_intervals_received += 1;
                 audio_bytes_recv += data.len() as u64;
+                if logged_first_frame_recv.insert(from.clone()) {
+                    info!(peer = %from, "audio: first frame received from peer");
+                }
 
                 if let Some(ref rec) = recorder {
                     let name = peers.get(&from).and_then(|p| p.display_name.clone());
@@ -1035,7 +1038,7 @@ async fn session_loop(
                         audio_bytes_recv,
                         audio_dc_open: dc_open,
                         plugin_connected: !ipc_pool.is_empty(),
-                        audio_send_gated: audio_gate.is_gated(),
+                        audio_send_gated: false,
                         recording: recorder.is_some(),
                         recording_size_bytes: recorder.as_ref().map_or(0, |r| r.bytes_written()),
                     });
@@ -1060,82 +1063,4 @@ async fn session_loop(
     }
 
     Ok(())
-}
-
-
-struct AudioSendGate {
-    gated: bool,
-}
-
-impl AudioSendGate {
-    fn new() -> Self {
-        Self { gated: false }
-    }
-
-    /// Gates if joining a room that already has peers.
-    fn on_peer_list(&mut self, peer_count: usize) {
-        if peer_count > 0 {
-            self.gated = true;
-        } else {
-            self.gated = false;
-        }
-    }
-
-    /// Lifts gate once beat sync is achieved.
-    fn on_beat_synced(&mut self) {
-        self.gated = false;
-    }
-
-    /// Re-gates on signaling reconnection; beat sync must re-establish.
-    fn on_reconnect(&mut self) {
-        self.gated = true;
-    }
-
-    fn is_gated(&self) -> bool {
-        self.gated
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::AudioSendGate;
-
-    #[test]
-    fn first_peer_not_gated() {
-        let mut gate = AudioSendGate::new();
-        gate.on_peer_list(0);
-        assert!(!gate.is_gated());
-    }
-
-    #[test]
-    fn second_peer_gated_then_unlocked() {
-        let mut gate = AudioSendGate::new();
-        gate.on_peer_list(1);
-        assert!(gate.is_gated());
-        gate.on_beat_synced();
-        assert!(!gate.is_gated());
-    }
-
-    #[test]
-    fn reconnect_regates_until_beat_sync() {
-        let mut gate = AudioSendGate::new();
-        gate.on_peer_list(1);
-        gate.on_beat_synced();
-        assert!(!gate.is_gated());
-        gate.on_reconnect();
-        assert!(gate.is_gated());
-        gate.on_peer_list(1);
-        assert!(gate.is_gated());
-        gate.on_beat_synced();
-        assert!(!gate.is_gated());
-    }
-
-    #[test]
-    fn first_peer_reconnects_to_empty_room() {
-        let mut gate = AudioSendGate::new();
-        gate.on_reconnect();
-        assert!(gate.is_gated());
-        gate.on_peer_list(0);
-        assert!(!gate.is_gated());
-    }
 }
