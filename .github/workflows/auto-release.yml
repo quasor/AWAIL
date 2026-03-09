@@ -101,7 +101,7 @@ jobs:
             exit 1
           fi
           sleep 5
-          gh pr merge "$PR" --merge --delete-branch
+          gh pr merge "$PR" --merge
 
       # GITHUB_TOKEN merges don't trigger other workflows, so we run the
       # release steps inline instead of relying on release-on-merge.yml.
