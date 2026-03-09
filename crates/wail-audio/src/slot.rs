@@ -6,7 +6,7 @@ pub const MAX_SLOTS: usize = 15;
 /// Uniquely identifies a single audio channel from a specific client.
 ///
 /// Combines the client's persistent identity (UUID, survives reconnects/restarts)
-/// with the channel index (stream_id from the WAIL Send plugin, 0–30).
+/// with the channel index (stream_id from the WAIL Send plugin, 0–14).
 /// Used as the key for stable slot assignment on the receiving side.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClientChannelMapping {
