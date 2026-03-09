@@ -64,13 +64,20 @@ impl LinkBridge {
     /// Uses `forceBeatAtTime` from the Link SDK — an immediate, non-negotiated
     /// timeline edit. Intended for one-shot join-time sync only; calling it
     /// repeatedly is disruptive to LAN Link peers.
-    pub fn force_beat(&mut self, beat: f64) {
+    ///
+    /// `rtt_us` is the round-trip time to the sender in microseconds. When
+    /// provided, the beat value is advanced by `RTT/2 * BPM/60` to compensate
+    /// for one-way transit time (the remote beat was sampled ~RTT/2 ago).
+    pub fn force_beat(&mut self, beat: f64, rtt_us: Option<i64>) {
         let time = self.link.clock_micros();
         self.link.capture_app_session_state(&mut self.session_state);
-        self.session_state.force_beat_at_time(beat, time, self.quantum);
+        let bpm = self.session_state.tempo();
+        let compensation = rtt_us.unwrap_or(0) as f64 / 2_000_000.0 * bpm / 60.0;
+        let compensated = beat + compensation;
+        self.session_state.force_beat_at_time(compensated, time, self.quantum);
         self.link.commit_app_session_state(&self.session_state);
         self.echo_guard_until = Some(Instant::now() + ECHO_GUARD_DURATION);
-        info!(beat, "Forced beat position for join-time sync");
+        info!(beat, compensated, rtt_us, "Forced beat position for join-time sync");
     }
 
     /// Apply a remote tempo change to the local Link session.
@@ -172,8 +179,8 @@ impl LinkBridge {
                             Some(LinkCommand::SetTempo(bpm)) => {
                                 self.set_tempo(bpm);
                             }
-                            Some(LinkCommand::ForceBeat(beat)) => {
-                                self.force_beat(beat);
+                            Some(LinkCommand::ForceBeat { beat, rtt_us }) => {
+                                self.force_beat(beat, rtt_us);
                             }
                             Some(LinkCommand::GetState(tx)) => {
                                 if tx.send(self.state()).is_err() {
@@ -195,7 +202,8 @@ impl LinkBridge {
 pub enum LinkCommand {
     SetTempo(f64),
     /// Snap the local beat clock to the given position (join-time sync only).
-    ForceBeat(f64),
+    /// `rtt_us` is used to compensate for one-way network transit time.
+    ForceBeat { beat: f64, rtt_us: Option<i64> },
     GetState(tokio::sync::oneshot::Sender<LinkState>),
 }
 

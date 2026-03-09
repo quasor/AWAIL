@@ -806,7 +806,8 @@ async fn session_loop(
                         if !initial_beat_synced {
                             initial_beat_synced = true;
                             ui_info!(&app, "Beat sync — snapped to beat {remote_beat:.2}");
-                            if link_cmd_tx.send(LinkCommand::ForceBeat(remote_beat)).is_err() {
+                            let rtt_us = clock.rtt_us(&from);
+                            if link_cmd_tx.send(LinkCommand::ForceBeat { beat: remote_beat, rtt_us }).is_err() {
                                 ui_warn!(&app, "Link bridge stopped — cannot force beat");
                             }
                             interval.set_config(bars, quantum);
