@@ -2,7 +2,7 @@
 
 ## Overview
 
-WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer DataChannels. Musicians on different networks sync tempo, phase, and interval boundaries as if they were on the same LAN. Audio is captured per interval (NINJAM-style), Opus-encoded, and transmitted over binary DataChannels. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture, multiple instances supported) and WAIL Recv (playback, up to 31 per-slot auxiliary outputs).
+WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer DataChannels. Musicians on different networks sync tempo, phase, and interval boundaries as if they were on the same LAN. Audio is captured per interval (NINJAM-style), Opus-encoded, and transmitted over binary DataChannels. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture, multiple instances supported) and WAIL Recv (playback, up to 15 per-slot auxiliary outputs).
 
 ## System Diagram
 
@@ -47,11 +47,11 @@ wail-tauri (Tauri desktop app — session orchestration, IPC, recording)
     ├── wail-core
     └── webrtc (pure Rust WebRTC)
 
-wail-plugin-send (CLAP/VST3, captures DAW audio, stream_index param 0-30)
+wail-plugin-send (CLAP/VST3, captures DAW audio, stream_index param 0-14)
 ├── wail-core
 └── wail-audio
 
-wail-plugin-recv (CLAP/VST3, plays remote audio, 31 aux outputs)
+wail-plugin-recv (CLAP/VST3, plays remote audio, 15 aux outputs)
 ├── wail-core
 └── wail-audio
 
@@ -88,7 +88,7 @@ Traditional real-time audio requires <20ms round-trip latency. That's impossible
 
 ### The Double-Buffer
 
-`IntervalRing` implements the NINJAM double-buffer with up to 31 remote slots, keyed by `ClientChannelMapping(client_id, channel_index)` — a persistent identity that survives reconnects:
+`IntervalRing` implements the NINJAM double-buffer with up to 15 remote slots, keyed by `ClientChannelMapping(client_id, channel_index)` — a persistent identity that survives reconnects:
 
 ```
 Interval N:   [RECORD local audio] ──→ on boundary ──→ encode + transmit
@@ -103,7 +103,7 @@ At each interval boundary:
 - Pending remote intervals are mixed (summed) into the playback slot
 - Record and playback positions reset to zero
 
-Each unique `ClientChannelMapping` (persistent `client_id` + `channel_index`) is assigned its own playback slot and Recv plugin auxiliary output via a `SlotTable`. If all 31 slots are exhausted, overflow audio is merged into the peer's channel 0 slot.
+Each unique `ClientChannelMapping` (persistent `client_id` + `channel_index`) is assigned its own playback slot and Recv plugin auxiliary output via a `SlotTable`. If all 15 slots are exhausted, overflow audio is merged into the peer's channel 0 slot.
 
 Slot assignment uses **affinity**: when a peer disconnects, their `SlotTable` entries move from active to reserved. When the same persistent identity reconnects (possibly with a new session-scoped `peer_id`), they reclaim their original slots, keeping DAW aux routing stable across reconnects.
 

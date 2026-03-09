@@ -1302,7 +1302,7 @@ mod tests {
 
         ring.process(&input, &mut output, 0.0);
 
-        // Fill all 31 slots with distinct peer-streams
+        // Fill all 15 slots with distinct peer-streams
         // Peer-a stream 0 is at slot 0 (this is the merge target)
         ring.feed_remote("peer-a".into(), 0, 0, vec![0.1f32; buf]);
         for i in 1..MAX_REMOTE_PEERS {
@@ -1310,12 +1310,12 @@ mod tests {
             ring.feed_remote(peer, 0, 0, vec![0.01f32; buf]);
         }
 
-        // 32nd stream should overflow — merge into peer-a's stream 0
+        // 16th stream should overflow — merge into peer-a's stream 0
         ring.feed_remote("peer-a".into(), 5, 0, vec![0.5f32; buf]);
 
         ring.process(&input, &mut output, 16.0);
 
-        // Should still have exactly 31 active slots (no new slot for overflow)
+        // Should still have exactly 15 active slots (no new slot for overflow)
         let active = ring.active_peer_slots();
         assert_eq!(active.len(), MAX_REMOTE_PEERS);
 
