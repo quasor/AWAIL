@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of remote peer-channel slots with independent audio channels.
-pub const MAX_SLOTS: usize = 31;
+pub const MAX_SLOTS: usize = 15;
 
 /// Uniquely identifies a single audio channel from a specific client.
 ///
