@@ -104,6 +104,13 @@ where
         }
 
         let metadata = event.metadata();
+
+        // Only forward wail crate events to the UI; for third-party crates
+        // (webrtc-rs, tokio, etc.) require WARN+ to avoid flooding with
+        // internal messages like "pingAllCandidates called with no candidate pairs".
+        if !metadata.target().starts_with("wail") && *metadata.level() > tracing::Level::WARN {
+            return;
+        }
         let level = metadata.level().as_str().to_lowercase();
         let target = metadata.target().to_string();
 
