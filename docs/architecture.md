@@ -291,3 +291,13 @@ Two independent time domains exist in the system:
 11. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.rs` in wail-tauri.
 
 12. **Fade-in on peer join**: When a new or reconnecting peer's first audio interval arrives, a 10ms linear ramp-from-silence is applied before mixing into the playback buffer. This prevents audible pops/clicks caused by abrupt sample onset. The fade length is clamped to the interval length for safety. After the first interval, subsequent intervals play at full amplitude with no ramping.
+
+## CI/CD Pipeline
+
+Every push to `main` triggers continuous deployment:
+
+1. `auto-release.yml` → consumes `.changeset/` files and conventional commits, bumps versions, updates CHANGELOG, creates a release PR, and auto-merges it
+2. `release-on-merge.yml` → detects the merged release PR, runs `knope release` to create a GitHub release + git tag
+3. `release.yml` → builds platform artifacts (macOS, Windows, Linux — plugins + Tauri installers) and uploads them to the GitHub release
+
+> **Note:** The auto-merge step uses `GITHUB_TOKEN` which cannot bypass branch protection rules. If required status checks or PR review requirements are ever added to `main`, the auto-merge will fail and you'll need a GitHub App token with bypass permissions, or exempt the `release` branch from those rules.
