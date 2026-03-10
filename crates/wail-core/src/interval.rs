@@ -164,4 +164,16 @@ mod tests {
         // Beat advances into interval 3 (beat 48+)
         assert_eq!(tracker.update(50.0), Some(3));
     }
+
+    #[test]
+    fn interval_zero_is_valid_not_uninitialized() {
+        // Regression: interval index 0 must NOT be treated as "not started".
+        // The old guard `current_index() <= Some(0)` blocked interval 0 because
+        // Rust's Option ordering makes `Some(0) <= Some(0)` true.
+        let mut tracker = IntervalTracker::new(4, 4.0);
+        tracker.update(0.0); // enters interval 0
+        assert_eq!(tracker.current_index(), Some(0));
+        assert!(tracker.current_index().is_some(), "interval 0 is a valid interval");
+        assert!(!tracker.current_index().is_none(), "interval 0 must not be treated as None");
+    }
 }

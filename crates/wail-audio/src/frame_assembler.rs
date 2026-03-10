@@ -127,3 +127,67 @@ impl FrameAssembler {
             .retain(|&(idx, _, _), _| idx >= current_interval - 2);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interval::AudioFrame;
+
+    #[test]
+    fn missing_frames_produce_zero_length_entries() {
+        let mut assembler = FrameAssembler::new();
+
+        // Send frame 0
+        let result = assembler.insert("peer-a", &AudioFrame {
+            interval_index: 1,
+            stream_id: 0,
+            frame_number: 0,
+            channels: 2,
+            opus_data: vec![1, 2, 3],
+            is_final: false,
+            sample_rate: 48000,
+            total_frames: 0,
+            bpm: 120.0,
+            quantum: 4.0,
+            bars: 4,
+        });
+        assert!(result.is_none());
+
+        // Skip frame 1 (simulates network loss)
+
+        // Send frame 2 as final, total_frames=3
+        let result = assembler.insert("peer-a", &AudioFrame {
+            interval_index: 1,
+            stream_id: 0,
+            frame_number: 2,
+            channels: 2,
+            opus_data: vec![7, 8, 9],
+            is_final: true,
+            sample_rate: 48000,
+            total_frames: 3,
+            bpm: 120.0,
+            quantum: 4.0,
+            bars: 4,
+        });
+        let assembled = result.expect("should assemble on final frame");
+
+        // Verify the blob: frame_count=3, frame0=real, frame1=zero-length, frame2=real
+        let blob = &assembled.opus_data;
+        let frame_count = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+        assert_eq!(frame_count, 3);
+
+        // Frame 0: len=3, data=[1,2,3]
+        let len0 = u16::from_le_bytes([blob[4], blob[5]]) as usize;
+        assert_eq!(len0, 3);
+        assert_eq!(&blob[6..9], &[1, 2, 3]);
+
+        // Frame 1: len=0 (missing)
+        let len1 = u16::from_le_bytes([blob[9], blob[10]]) as usize;
+        assert_eq!(len1, 0, "missing frame should have zero-length entry");
+
+        // Frame 2: len=3, data=[7,8,9]
+        let len2 = u16::from_le_bytes([blob[11], blob[12]]) as usize;
+        assert_eq!(len2, 3);
+        assert_eq!(&blob[13..16], &[7, 8, 9]);
+    }
+}
