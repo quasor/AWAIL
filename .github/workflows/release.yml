@@ -141,7 +141,7 @@ jobs:
           New-Item -ItemType Directory -Force $staged
 
           # Main Tauri exe and resources
-          Copy-Item target\release\WAIL.exe $staged\
+          Copy-Item target\release\wail-tauri.exe $staged\WAIL.exe
           if (Test-Path target\release\resources) {
             Copy-Item -Recurse target\release\resources $staged\resources
           }
