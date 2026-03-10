@@ -419,8 +419,8 @@ async fn session_loop(
             Some(frame) = ipc_from_plugin_rx.recv() => {
                 // Streaming audio frames (20ms Opus chunks, tag 0x05)
                 if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
-                    if interval.current_index() <= Some(0) {
-                        debug!("audio dropped — interval not started yet (idx={:?})", interval.current_index());
+                    if interval.current_index().is_none() {
+                        debug!("audio dropped — interval not started yet");
                         continue;
                     }
                     let failed_peers = mesh.broadcast_audio(&wire_data).await;

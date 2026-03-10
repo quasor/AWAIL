@@ -209,13 +209,20 @@ impl AudioDecoder {
             if offset + pkt_len > data.len() {
                 anyhow::bail!("Truncated audio data: missing frame payload");
             }
-            let packet = &data[offset..offset + pkt_len];
-            offset += pkt_len;
+            if pkt_len == 0 {
+                // Missing frame — use Opus Packet Loss Concealment
+                let mut_signals = MutSignals::try_from(decode_buf.as_mut_slice())?;
+                let decoded = self.decoder.decode_float(None, mut_signals, false)?;
+                output.extend_from_slice(&decode_buf[..decoded * ch]);
+            } else {
+                let packet = &data[offset..offset + pkt_len];
+                offset += pkt_len;
 
-            let opus_packet = Packet::try_from(packet)?;
-            let mut_signals = MutSignals::try_from(decode_buf.as_mut_slice())?;
-            let decoded = self.decoder.decode_float(Some(opus_packet), mut_signals, false)?;
-            output.extend_from_slice(&decode_buf[..decoded * ch]);
+                let opus_packet = Packet::try_from(packet)?;
+                let mut_signals = MutSignals::try_from(decode_buf.as_mut_slice())?;
+                let decoded = self.decoder.decode_float(Some(opus_packet), mut_signals, false)?;
+                output.extend_from_slice(&decode_buf[..decoded * ch]);
+            }
         }
 
         Ok(output)
@@ -325,6 +332,44 @@ mod tests {
         let samples = vec![0.5f32; 100];
         let opus_bytes = encoder.encode_frame(&samples).unwrap();
         assert!(!opus_bytes.is_empty());
+    }
+
+    #[test]
+    fn decode_interval_with_gap_frames_uses_plc() {
+        let sample_rate = 48000;
+        let channels = 2;
+        let mut encoder = AudioEncoder::new(sample_rate, channels, 128).unwrap();
+        let mut decoder = AudioDecoder::new(sample_rate, channels).unwrap();
+
+        // Encode 3 real frames
+        let frame_samples = encoder.frame_size() * channels as usize;
+        let samples: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / channels as usize) as f32 / sample_rate as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+
+        let frame0 = encoder.encode_frame(&samples).unwrap();
+        let _frame1 = encoder.encode_frame(&samples).unwrap();
+        let frame2 = encoder.encode_frame(&samples).unwrap();
+
+        // Build interval blob with a gap at frame index 1 (zero-length entry)
+        let total_frames: u32 = 3;
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&total_frames.to_le_bytes());
+        // Frame 0: real data
+        blob.extend_from_slice(&(frame0.len() as u16).to_le_bytes());
+        blob.extend_from_slice(&frame0);
+        // Frame 1: missing (zero-length → PLC)
+        blob.extend_from_slice(&0u16.to_le_bytes());
+        // Frame 2: real data
+        blob.extend_from_slice(&(frame2.len() as u16).to_le_bytes());
+        blob.extend_from_slice(&frame2);
+
+        let decoded = decoder.decode_interval(&blob).unwrap();
+        // Should produce 3 frames worth of samples (960 * 2 = 1920 per frame)
+        assert_eq!(decoded.len(), 3 * frame_samples);
     }
 
     #[test]
