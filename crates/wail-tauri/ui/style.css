@@ -601,6 +601,11 @@ summary:hover {
   background: var(--bg-hover);
 }
 
+.peer-item--local {
+  border-left: 2px solid #88aaff;
+  opacity: 0.9;
+}
+
 .peer-name {
   font-weight: 600;
   font-size: 12px;

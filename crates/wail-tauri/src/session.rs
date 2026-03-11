@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -201,10 +202,10 @@ async fn session_loop(
 
     // One-shot logging flags for audio transmission milestones
     let mut logged_first_frame_sent = false;
-    let mut logged_first_frame_recv: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut logged_first_frame_recv: HashSet<String> = HashSet::new();
 
     // Track last-logged AudioStatus per peer to avoid flooding the UI
-    let mut peer_audio_status: std::collections::HashMap<String, (bool, bool)> = std::collections::HashMap::new();
+    let mut peer_audio_status: HashMap<String, (bool, bool)> = HashMap::new();
 
     // Test mode: track interval boundary timing
     let mut last_boundary_time: Option<Instant> = None;
@@ -216,6 +217,9 @@ async fn session_loop(
     let mut audio_bytes_sent: u64 = 0;
     let mut audio_intervals_sent: u64 = 0;
     let mut audio_bytes_recv: u64 = 0;
+    // Local send plugin tracking
+    let mut local_send_streams: HashMap<usize, u16> = HashMap::new(); // conn_id → stream_index
+    let mut local_send_active: HashSet<u16> = HashSet::new(); // streams that sent audio this tick
     // Per-interval delta counters (reset at each boundary)
     let mut interval_frames_sent: u64 = 0;
     let mut interval_frames_recv: u64 = 0;
@@ -373,6 +377,7 @@ async fn session_loop(
                             ipc_pool.push(conn_id, write_half);
                         } else {
                             // Send plugin — we don't need its write half (it only sends audio TO us)
+                            local_send_streams.insert(conn_id, stream_index);
                             drop(write_half);
                         }
                         let _ = app.emit("plugin:connected", ());
@@ -435,6 +440,11 @@ async fn session_loop(
                     if interval.current_index().is_none() {
                         debug!("audio dropped — interval not started yet");
                         continue;
+                    }
+                    // Track which stream is actively sending (WAIF: stream_id at bytes [5..7])
+                    if wire_data.len() >= 7 && &wire_data[0..4] == b"WAIF" {
+                        let stream_id = u16::from_le_bytes([wire_data[5], wire_data[6]]);
+                        local_send_active.insert(stream_id);
                     }
                     let failed_peers = mesh.broadcast_audio(&wire_data).await;
                     audio_bytes_sent += wire_data.len() as u64;
@@ -923,6 +933,7 @@ async fn session_loop(
             // --- IPC disconnect notification ---
             Some(conn_id) = ipc_disconnect_rx.recv() => {
                 ipc_pool.remove(conn_id);
+                local_send_streams.remove(&conn_id);
                 ui_info!(&app, "IPC connection {conn_id} removed");
             }
 
@@ -1200,6 +1211,17 @@ async fn session_loop(
                         .collect();
                     let _ = app.emit("peers:network", PeersNetwork { peers: network_infos });
 
+                    // Build local send plugin view and reset per-tick active set
+                    let mut local_sends: Vec<LocalSendInfo> = local_send_streams
+                        .values()
+                        .map(|&stream_index| LocalSendInfo {
+                            stream_index,
+                            is_sending: local_send_active.contains(&stream_index),
+                        })
+                        .collect();
+                    local_sends.sort_by_key(|ls| ls.stream_index);
+                    local_send_active.clear();
+
                     // Update snapshots for next tick
                     peers.flush_audio_recv_prev();
                     let _ = app.emit("status:update", StatusUpdate {
@@ -1209,6 +1231,7 @@ async fn session_loop(
                         link_peers: state.num_peers,
                         peers: peer_infos,
                         slots: slot_infos,
+                        local_sends,
                         interval_bars: interval.bars(),
                         audio_sent: audio_intervals_sent,
                         audio_recv: audio_intervals_received,
