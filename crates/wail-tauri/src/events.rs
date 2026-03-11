@@ -50,6 +50,15 @@ pub struct PeerInfo {
     pub is_receiving: bool,
 }
 
+/// Local send plugin info: one entry per connected WAIL Send plugin instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalSendInfo {
+    /// Stream index (0–14) matching the Send plugin's stream_index parameter.
+    pub stream_index: u16,
+    /// True if audio frames were received from this stream since the last status tick.
+    pub is_sending: bool,
+}
+
 /// Slot-centric view: one entry per occupied DAW aux output slot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlotInfo {
@@ -83,6 +92,7 @@ pub struct StatusUpdate {
     pub link_peers: u64,
     pub peers: Vec<PeerInfo>,
     pub slots: Vec<SlotInfo>,
+    pub local_sends: Vec<LocalSendInfo>,
     pub interval_bars: u32,
     pub audio_sent: u64,
     pub audio_recv: u64,

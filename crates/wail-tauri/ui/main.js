@@ -681,13 +681,24 @@ async function setupListeners() {
       document.getElementById('recording-size').textContent = `${mb} MB`;
     }
 
-    // Update slot list (slot-centric view)
+    // Update slot list (local sends first, then remote slots)
     const slotList = document.getElementById('peer-list');
+    const localSends = s.local_sends || [];
     const slots = (s.slots || []).slice().sort((a, b) => a.slot - b.slot);
-    if (slots.length === 0) {
+    if (localSends.length === 0 && slots.length === 0) {
       slotList.innerHTML = '<span class="empty">No peers connected</span>';
     } else {
-      slotList.innerHTML = slots.map(sl => {
+      const localHtml = localSends.map(ls => {
+        const label = localSends.length > 1 ? `My Send (stream ${ls.stream_index})` : 'My Send';
+        const sendClass = ls.is_sending ? 'peer-status status-connected' : 'peer-status';
+        const sendLabel = ls.is_sending ? 'sending' : 'idle';
+        return `<div class="peer-item peer-item--local">
+          <span class="peer-slot">Send</span><span class="peer-name">${label}</span>
+          <span class="${sendClass}">${sendLabel}</span>
+          <span class="peer-rtt"></span>
+        </div>`;
+      }).join('');
+      const remoteHtml = slots.map(sl => {
         const name = sl.display_name
           ? `${escapeHtml(sl.display_name)} (${escapeHtml(sl.short_id)})`
           : escapeHtml(sl.short_id);
@@ -700,6 +711,7 @@ async function setupListeners() {
           <span class="peer-rtt">${rtt}</span>
         </div>`;
       }).join('');
+      slotList.innerHTML = localHtml + remoteHtml;
     }
   }));
 
