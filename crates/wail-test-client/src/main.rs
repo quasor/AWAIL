@@ -130,6 +130,7 @@ async fn main() -> Result<()> {
         NOTE_NAMES[0], NOTE_NAMES[1], NOTE_NAMES[2], NOTE_NAMES[3], NOTE_NAMES[4]
     );
     println!("Amplitude:  {}", args.amplitude);
+    println!("Streams:    0 = tone, 1 = echo (re-sends received audio)");
     println!();
 
     // --- ICE servers ---
@@ -153,7 +154,7 @@ async fn main() -> Result<()> {
         password,
         ice_servers,
         args.relay_only,
-        1,
+        2, // stream 0 = tone, stream 1 = echo
         Some(&args.name),
     )
     .await?;
@@ -186,6 +187,7 @@ async fn main() -> Result<()> {
     let mut global_bar: u64 = 0;
     let amplitude = args.amplitude.clamp(0.0, 1.0);
     let mut intervals_sent: u64 = 0;
+    let mut echo_frames: u64 = 0;
     let start_time = Instant::now();
 
     // --- 20ms frame timer ---
@@ -268,8 +270,21 @@ async fn main() -> Result<()> {
                 handle_sync(&mesh, &from, &msg, &peer_id, &identity, &args.name).await;
             }
 
-            Some((_from, _data)) = audio_rx.recv() => {
-                // Discard incoming audio — we're a tone generator, not a receiver.
+            Some((from, data)) = audio_rx.recv() => {
+                // Echo received audio back on stream 1.
+                // Only echo stream 0 to avoid infinite loops between test clients.
+                if data.len() >= 7 && &data[0..4] == b"WAIF" {
+                    let src_stream = u16::from_le_bytes([data[5], data[6]]);
+                    if src_stream == 0 {
+                        let mut echo = data;
+                        echo[5..7].copy_from_slice(&1u16.to_le_bytes());
+                        mesh.broadcast_audio(&echo).await;
+                        echo_frames += 1;
+                        if echo_frames == 1 {
+                            println!("Echo: first frame from {from} re-sent on stream 1");
+                        }
+                    }
+                }
             }
 
             result = mesh.poll_signaling() => {
@@ -294,7 +309,7 @@ async fn main() -> Result<()> {
             }
 
             _ = tokio::signal::ctrl_c() => {
-                println!("\nShutting down ({intervals_sent} intervals sent).");
+                println!("\nShutting down ({intervals_sent} intervals sent, {echo_frames} frames echoed).");
                 break;
             }
         }
