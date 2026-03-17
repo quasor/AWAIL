@@ -775,3 +775,201 @@ fn late_join_bidirectional_e2e() {
     send_b_host.leak();
     recv_b_host.leak();
 }
+
+// ---------------------------------------------------------------------------
+// Peer disconnect → silence test
+// ---------------------------------------------------------------------------
+
+/// Verify that the recv plugin returns to silence after the remote peer disconnects.
+///
+/// Timeline:
+///   Phase 1 — Normal audio flow: send-a → WebRTC → recv-b (confirm audio is playing)
+///   Phase 2 — Kill send-side mini_app (simulates peer crash / app quit)
+///   Phase 3 — Continue driving recv-b; verify output goes silent within 2 intervals
+///
+/// This catches stale ring buffer bugs where the playback slot replays old audio
+/// indefinitely after the peer is gone. The mini_app sends PeerLeft IPC on disconnect,
+/// which should trigger the recv plugin to clear its audio state.
+///
+/// Duration: ~50s (30s audio + 8s setup + 15s disconnect verification).
+#[test]
+fn peer_disconnect_silence_e2e() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_test_writer()
+        .try_init();
+
+    let mut send_host = load_send();
+    let mut recv_host = load_recv();
+
+    let send_ipc_port = common::random_port();
+    let recv_ipc_port = common::random_port();
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+    // 1. Start signaling + both mini_apps; capture the send-side handle for later abort.
+    let send_app_handle = rt.block_on(async {
+        let signaling_url = common::start_test_signaling_server().await;
+
+        let url_a = signaling_url.clone();
+        let handle = tokio::spawn(common::mini_app_session(
+            send_ipc_port,
+            url_a,
+            "disconnect-room".into(),
+            "peer-a".into(),
+            "test".into(),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        tokio::spawn(common::mini_app_session(
+            recv_ipc_port,
+            signaling_url,
+            "disconnect-room".into(),
+            "peer-b".into(),
+            "test".into(),
+        ));
+
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        handle
+    });
+
+    // 2. Activate plugins
+    let buf_size: u32 = 4096;
+    unsafe { std::env::set_var("WAIL_IPC_ADDR", format!("127.0.0.1:{send_ipc_port}")) };
+    let send_stopped = send_host
+        .activate(48000.0, 32, 4096)
+        .expect("Failed to activate send plugin");
+    let mut send_proc = send_stopped
+        .start_processing()
+        .expect("Failed to start send processing");
+
+    std::thread::sleep(Duration::from_millis(200));
+
+    unsafe { std::env::set_var("WAIL_IPC_ADDR", format!("127.0.0.1:{recv_ipc_port}")) };
+    let recv_stopped = recv_host
+        .activate(48000.0, 32, 4096)
+        .expect("Failed to activate recv plugin");
+    let mut recv_proc = recv_stopped
+        .start_processing()
+        .expect("Failed to start recv processing");
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    // 3. Phase 1: Drive audio at real-time speed for ~30s (same as the main test).
+    //    Confirm audio is flowing before we disconnect.
+    let phase1_callbacks: u64 = 450;
+    let sleep_per_callback = Duration::from_secs_f64(buf_size as f64 / 48000.0);
+    let mut phase1_non_silent: u32 = 0;
+    let wall_start = std::time::Instant::now();
+
+    for i in 0..phase1_callbacks {
+        let steady_time = i * buf_size as u64;
+        let interval_index = steady_time / 384_000;
+        let send_freq = interval_freq(interval_index);
+        drive_send(&mut send_proc, buf_size, steady_time, send_freq);
+        let out_l = drive_recv(&mut recv_proc, buf_size, steady_time);
+
+        if rms(&out_l) > 0.001 {
+            phase1_non_silent += 1;
+        }
+
+        let expected_elapsed = sleep_per_callback * (i as u32 + 1);
+        let actual_elapsed = wall_start.elapsed();
+        if let Some(remaining) = expected_elapsed.checked_sub(actual_elapsed) {
+            std::thread::sleep(remaining);
+        }
+    }
+
+    eprintln!(
+        "[disconnect] Phase 1: {phase1_non_silent}/{phase1_callbacks} non-silent buffers"
+    );
+    assert!(
+        phase1_non_silent >= 300,
+        "Phase 1 failed: expected substantial audio before disconnect, \
+         got only {phase1_non_silent}/{phase1_callbacks} non-silent buffers"
+    );
+
+    // 4. Kill the send-side mini_app. This drops WebRTC connections, causing
+    //    the recv-side mini_app to detect PeerLeft/PeerFailed and send PeerLeft IPC.
+    rt.block_on(async {
+        send_app_handle.abort();
+        // Give the recv-side mini_app time to detect the disconnection and
+        // forward PeerLeft IPC to the recv plugin.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    });
+
+    // Also stop sending audio from the send plugin (it has no peer to send to).
+    let send_stopped = send_proc.stop_processing();
+    send_host.deactivate(send_stopped);
+
+    // 5. Phase 2: Drive recv-only at real-time speed for ~2 intervals (188 callbacks).
+    //    The recv plugin should output silence after the ring buffer's current interval
+    //    finishes playing.
+    let phase2_callbacks: u64 = 188;
+    let mut phase2_non_silent: u32 = 0;
+    let mut last_non_silent_cb: Option<u64> = None;
+    let phase2_wall_start = std::time::Instant::now();
+
+    for i in 0..phase2_callbacks {
+        let steady_time = (phase1_callbacks + i) * buf_size as u64;
+        let out_l = drive_recv(&mut recv_proc, buf_size, steady_time);
+
+        if rms(&out_l) > 0.001 {
+            phase2_non_silent += 1;
+            last_non_silent_cb = Some(i);
+        }
+
+        let expected_elapsed = sleep_per_callback * (i as u32 + 1);
+        let actual_elapsed = phase2_wall_start.elapsed();
+        if let Some(remaining) = expected_elapsed.checked_sub(actual_elapsed) {
+            std::thread::sleep(remaining);
+        }
+    }
+
+    eprintln!(
+        "[disconnect] Phase 2: {phase2_non_silent}/{phase2_callbacks} non-silent buffers \
+         (last non-silent at cb {:?})",
+        last_non_silent_cb,
+    );
+
+    // Allow up to 1 interval of residual audio (the currently-playing interval
+    // may have buffered data). After that, output must be silence.
+    // 1 interval = 94 callbacks at 4096/48kHz/120BPM.
+    let max_residual_callbacks: u64 = 100; // slightly generous
+    if let Some(last) = last_non_silent_cb {
+        assert!(
+            last < max_residual_callbacks,
+            "Recv plugin still producing audio {last} callbacks after peer disconnect. \
+             Expected silence within ~1 interval ({max_residual_callbacks} callbacks). \
+             The ring buffer may be replaying stale data."
+        );
+    }
+
+    // The second half of phase 2 (callbacks 94-188) must be fully silent.
+    // We check by looking at the last interval's worth of callbacks.
+    let tail_start = max_residual_callbacks.min(phase2_callbacks);
+    let tail_non_silent: u32 = if last_non_silent_cb.map_or(true, |l| l < tail_start) {
+        0
+    } else {
+        // Recount — last_non_silent_cb already checked above, but be defensive
+        1
+    };
+    assert_eq!(
+        tail_non_silent, 0,
+        "Recv plugin produced audio in the tail region (callbacks {tail_start}..{phase2_callbacks}) \
+         after peer disconnect. Output must be fully silent after the residual interval drains."
+    );
+
+    eprintln!(
+        "[disconnect] PASSED — audio stopped within {:?} callbacks of peer disconnect, \
+         tail region ({tail_start}..{phase2_callbacks}) fully silent.",
+        last_non_silent_cb,
+    );
+
+    // 6. Cleanup
+    let recv_stopped = recv_proc.stop_processing();
+    recv_host.deactivate(recv_stopped);
+    send_host.leak();
+    recv_host.leak();
+}
