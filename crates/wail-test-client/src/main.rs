@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -221,6 +221,12 @@ async fn main() -> Result<()> {
     // Track which peers we've already greeted to avoid Hello ping-pong storms.
     let mut greeted_peers: HashSet<String> = HashSet::new();
 
+    // Per-peer audio health: frames received from each peer vs what they report sending.
+    let mut peer_frames_recv: HashMap<String, u64> = HashMap::new();
+    let mut peer_remote_sent: HashMap<String, u64> = HashMap::new();
+    let mut peer_names: HashMap<String, String> = HashMap::new();
+    let mut last_health_print = Instant::now();
+
     // Track interval/bar transitions from Link beat position.
     let mut interval_tracker = IntervalTracker::new(args.bars, args.quantum);
     let mut prev_bar: Option<u32> = None;
@@ -323,13 +329,29 @@ async fn main() -> Result<()> {
                 mesh.broadcast_audio(&wire_bytes).await;
 
                 frame_in_interval += 1;
+
+                // Print per-peer health every 5 seconds.
+                if last_health_print.elapsed() >= Duration::from_secs(5) && !peer_remote_sent.is_empty() {
+                    last_health_print = Instant::now();
+                    for (pid, &remote_sent) in &peer_remote_sent {
+                        let local_recv = peer_frames_recv.get(pid).copied().unwrap_or(0);
+                        let pct = if remote_sent > 0 {
+                            local_recv as f64 / remote_sent as f64 * 100.0
+                        } else {
+                            100.0
+                        };
+                        let name = peer_names.get(pid).map(|s| s.as_str()).unwrap_or(&pid[..pid.len().min(8)]);
+                        println!("[{name}] health: {local_recv}/{remote_sent} frames ({pct:.1}%)");
+                    }
+                }
             }
 
             Some((from, msg)) = sync_rx.recv() => {
-                handle_sync(&mesh, &from, &msg, &peer_id, &identity, &args.name, &mut greeted_peers, &link, &mut session_state, &mut interval_tracker).await;
+                handle_sync(&mesh, &from, &msg, &peer_id, &identity, &args.name, &mut greeted_peers, &link, &mut session_state, &mut interval_tracker, &mut peer_remote_sent, &mut peer_names).await;
             }
 
             Some((from, data)) = audio_rx.recv() => {
+                *peer_frames_recv.entry(from.clone()).or_insert(0) += 1;
                 if args.echo {
                     // Echo received audio back on stream 1.
                     // Only echo stream 0 to avoid infinite loops between test clients.
@@ -432,6 +454,8 @@ async fn handle_sync(
     link: &AblLink,
     session_state: &mut SessionState,
     interval_tracker: &mut IntervalTracker,
+    peer_remote_sent: &mut HashMap<String, u64>,
+    peer_names: &mut HashMap<String, String>,
 ) {
     match msg {
         SyncMessage::Ping { id, sent_at_us } => {
@@ -452,6 +476,9 @@ async fn handle_sync(
                 name = ?display_name,
                 "Received Hello"
             );
+            if let Some(name) = display_name {
+                peer_names.insert(from.to_string(), name.clone());
+            }
             // Only respond once per peer to avoid Hello ping-pong storms.
             if greeted_peers.insert(peer_id.clone()) {
                 mesh.send_to(
@@ -478,6 +505,9 @@ async fn handle_sync(
                 info!(local = ?interval_tracker.current_index(), remote = index, peer = %from, "Syncing interval index");
                 interval_tracker.sync_to(*index);
             }
+        }
+        SyncMessage::AudioStatus { intervals_sent, .. } => {
+            peer_remote_sent.insert(from.to_string(), *intervals_sent);
         }
         _ => {}
     }

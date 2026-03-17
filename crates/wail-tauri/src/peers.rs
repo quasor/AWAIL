@@ -23,6 +23,12 @@ pub struct PeerState {
     pub reconnect_pending: bool,
     pub audio_recv_count: u64,
     pub audio_recv_prev: u64,
+    /// Last `intervals_sent` value from this peer's AudioStatus message.
+    pub remote_intervals_sent: u64,
+    /// Cumulative frames expected across all assembled intervals from this peer.
+    pub total_frames_expected: u64,
+    /// Cumulative frames actually received (non-gap) across all assembled intervals.
+    pub total_frames_received: u64,
     pub prev_status: String,
     /// Timestamp of the most recent connection attempt for this peer. Used by the
     /// Hello-completion watchdog to detect peers that are active (receiving audio)
@@ -46,6 +52,9 @@ impl PeerState {
             reconnect_pending: false,
             audio_recv_count: 0,
             audio_recv_prev: 0,
+            remote_intervals_sent: 0,
+            total_frames_expected: 0,
+            total_frames_received: 0,
             prev_status: String::new(),
             added_at: Instant::now(),
             hello_retry_sent: false,

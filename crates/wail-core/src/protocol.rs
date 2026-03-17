@@ -80,6 +80,10 @@ pub enum SyncMessage {
         intervals_sent: u64,
         intervals_received: u64,
         plugin_connected: bool,
+        /// Monotonically increasing sequence number for heartbeat tracking.
+        /// Old peers omit this field.
+        #[serde(default)]
+        seq: u64,
     },
     ChatMessage {
         sender_name: String,
@@ -191,6 +195,7 @@ mod tests {
             intervals_sent: 5,
             intervals_received: 3,
             plugin_connected: true,
+            seq: 42,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let decoded: SyncMessage = serde_json::from_str(&json).expect("deserialize");
@@ -200,12 +205,25 @@ mod tests {
                 intervals_sent,
                 intervals_received,
                 plugin_connected,
+                seq,
             } => {
                 assert!(audio_dc_open);
                 assert_eq!(intervals_sent, 5);
                 assert_eq!(intervals_received, 3);
                 assert!(plugin_connected);
+                assert_eq!(seq, 42);
             }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audio_status_backward_compat_no_seq() {
+        // Old peers don't send seq — should default to 0
+        let json = r#"{"type":"AudioStatus","audio_dc_open":true,"intervals_sent":10,"intervals_received":7,"plugin_connected":false}"#;
+        let decoded: SyncMessage = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            SyncMessage::AudioStatus { seq, .. } => assert_eq!(seq, 0),
             other => panic!("unexpected variant: {other:?}"),
         }
     }
