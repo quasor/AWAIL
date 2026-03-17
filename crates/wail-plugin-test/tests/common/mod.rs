@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use wail_audio::{IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
+use wail_core::protocol::SyncMessage;
 use wail_net::PeerMesh;
 
 // ---------------------------------------------------------------------------
@@ -231,8 +232,9 @@ pub async fn start_test_signaling_server() -> String {
 ///
 /// - Forwards incoming WAIF frames (tag 0x05) from send plugins to all WebRTC peers.
 /// - Forwards incoming WebRTC audio to RECV-role plugin IPC connections (tag 0x01).
+/// - Exchanges Hello sync messages and sends PeerJoined/PeerLeft IPC to recv plugins
+///   (for slot affinity — ensures peers get the same aux output after reconnect).
 /// - No audio gate; no link_peers guard — audio flows unconditionally.
-///   This matches `mini_app_session_v2` from `wail-net/tests/ipc_e2e.rs`.
 pub async fn mini_app_session(
     ipc_port: u16,
     signaling_url: String,
@@ -240,8 +242,27 @@ pub async fn mini_app_session(
     peer_id: String,
     password: String,
 ) {
+    mini_app_session_with_identity(
+        ipc_port,
+        signaling_url,
+        room,
+        peer_id.clone(),
+        password,
+        peer_id, // use peer_id as identity fallback
+    ).await
+}
+
+/// Like `mini_app_session` but with an explicit persistent identity for slot affinity.
+pub async fn mini_app_session_with_identity(
+    ipc_port: u16,
+    signaling_url: String,
+    room: String,
+    peer_id: String,
+    password: String,
+    identity: String,
+) {
     let ice = wail_net::default_ice_servers();
-    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_with_ice(
+    let (mut mesh, mut sync_rx, mut audio_rx) = PeerMesh::connect_with_ice(
         &signaling_url,
         &room,
         &peer_id,
@@ -312,8 +333,43 @@ pub async fn mini_app_session(
                 }
             }
 
-            // Pump WebRTC/signaling negotiation
-            _event = mesh.poll_signaling() => {}
+            // Pump WebRTC/signaling negotiation; handle peer join/leave events
+            event = mesh.poll_signaling() => {
+                match event {
+                    Ok(Some(wail_net::MeshEvent::PeerJoined { peer_id: pid, .. })) => {
+                        // Send our Hello so the remote peer learns our identity
+                        let hello = SyncMessage::Hello {
+                            peer_id: peer_id.clone(),
+                            display_name: None,
+                            identity: Some(identity.clone()),
+                        };
+                        mesh.broadcast(&hello).await;
+                        let _ = pid; // used above for logging context
+                    }
+                    Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) |
+                    Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) => {
+                        // Notify recv plugins so they clear the peer's ring buffer slot
+                        let msg = IpcMessage::encode_peer_left(&pid);
+                        let frame = IpcFramer::encode_frame(&msg);
+                        for writer in &mut ipc_recv_writers {
+                            let _ = writer.write_all(&frame).await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Sync messages from remote peers (Hello, TempoChange, etc.)
+            Some((from, sync_msg)) = sync_rx.recv() => {
+                if let SyncMessage::Hello { identity: Some(remote_identity), .. } = &sync_msg {
+                    // Notify recv plugins of the peer's persistent identity (for slot affinity)
+                    let msg = IpcMessage::encode_peer_joined(&from, remote_identity);
+                    let frame = IpcFramer::encode_frame(&msg);
+                    for writer in &mut ipc_recv_writers {
+                        let _ = writer.write_all(&frame).await;
+                    }
+                }
+            }
 
             // WebRTC audio from remote peer → forward to all RECV plugin connections (tag 0x01)
             Some((from, data)) = audio_rx.recv() => {

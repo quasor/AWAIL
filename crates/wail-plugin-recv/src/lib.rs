@@ -26,6 +26,8 @@ enum PeerEvent {
     Joined { peer_id: String, identity: String },
     Left { peer_id: String },
     NameChanged { peer_id: String, display_name: String },
+    /// IPC connection dropped — clear all audio state to stop stale playback.
+    Disconnected,
 }
 
 /// Default IPC address (overridable via WAIL_IPC_ADDR env var).
@@ -195,6 +197,10 @@ impl Plugin for WailRecvPlugin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        // Disable GUI in debug builds to avoid crashes during development.
+        if cfg!(debug_assertions) {
+            return None;
+        }
         let data = self.editor_data.clone();
         create_egui_editor(
             self.editor_state.clone(),
@@ -379,6 +385,18 @@ impl Plugin for WailRecvPlugin {
                                     // arrives, so we apply deferred below after audio is fed.
                                     self.pending_names.insert(peer_id, display_name);
                                 }
+                                PeerEvent::Disconnected => {
+                                    tracing::info!("WAIL Recv: IPC disconnected — clearing audio state");
+                                    bridge.reset();
+                                    // Drain any buffered frames so stale audio doesn't play
+                                    if let Some(ref rx) = self.ipc_incoming_rx {
+                                        while rx.try_recv().is_ok() {}
+                                    }
+                                    self.pending_names.clear();
+                                    for name in &mut self.applied_slot_names {
+                                        *name = None;
+                                    }
+                                }
                             }
                         }
                     }
@@ -541,6 +559,7 @@ fn ipc_thread_recv(
             match stream.read(&mut read_buf) {
                 Ok(0) => {
                     tracing::info!("WAIL Recv IPC connection closed");
+                    let _ = peer_event_tx.try_send(PeerEvent::Disconnected);
                     break;
                 }
                 Ok(n) => {
@@ -639,6 +658,7 @@ fn ipc_thread_recv(
                 }
                 Err(_) => {
                     tracing::warn!("WAIL Recv IPC read error — reconnecting");
+                    let _ = peer_event_tx.try_send(PeerEvent::Disconnected);
                     break;
                 }
             }

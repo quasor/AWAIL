@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 clack-host = { git = "https://github.com/prokopyl/clack.git" }
 wail-audio = { path = "../wail-audio" }
+wail-core = { path = "../wail-core" }
 wail-net = { path = "../wail-net" }
 axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"

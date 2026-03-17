@@ -2105,4 +2105,33 @@ mod tests {
 
         assert_eq!(ring.pending_remote_count(), 4);
     }
+
+    #[test]
+    fn reset_produces_silence_after_active_playback() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // Start interval 0
+        ring.process(&input, &mut output, 0.0);
+
+        // Feed remote audio for interval 0
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; 1920]);
+
+        // Cross into interval 1 — remote audio mixes into playback
+        ring.process(&input, &mut output, 16.0);
+        let energy: f32 = output.iter().map(|s| s.abs()).sum();
+        assert!(energy > 0.0, "Should have audio before reset");
+
+        // Reset clears all state
+        ring.reset();
+
+        // Process again — should be silence
+        let mut output2 = vec![1.0f32; 128];
+        ring.process(&input, &mut output2, 16.5);
+        assert!(
+            output2.iter().all(|&s| s == 0.0),
+            "Expected silence after reset, but got audio"
+        );
+    }
 }
