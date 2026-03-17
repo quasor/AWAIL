@@ -189,6 +189,7 @@ h2 {
 
 .tab {
   flex: none;
+  width: auto;
   padding: 8px 16px;
   background: transparent;
   border: none;
