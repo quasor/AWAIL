@@ -105,37 +105,6 @@
       <button type="button" id="refresh-rooms-btn">Refresh</button>
     </div>
 
-    <!-- Settings Panel Overlay -->
-    <div id="settings-panel" class="modal-overlay" style="display:none">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2>Settings</h2>
-          <button type="button" id="settings-close-btn" class="icon-btn" title="Close">&times;</button>
-        </div>
-
-        <form id="settings-form" class="modal-body">
-          <label for="settings-display-name">Display Name</label>
-          <input type="text" id="settings-display-name" placeholder="Your name" required autocomplete="off">
-
-          <div class="remember-row">
-            <input type="checkbox" id="settings-telemetry" checked>
-            <label for="settings-telemetry" class="remember-label">Save debug log locally</label>
-          </div>
-
-          <div class="remember-row">
-            <input type="checkbox" id="settings-log-sharing">
-            <label for="settings-log-sharing" class="remember-label">Peer log streaming (share &amp; view live logs in session)</label>
-          </div>
-
-          <div class="remember-row">
-            <input type="checkbox" id="settings-remember" checked>
-            <label for="settings-remember" class="remember-label">Remember settings</label>
-          </div>
-
-          <button type="submit" id="settings-done-btn">Done</button>
-        </form>
-      </div>
-    </div>
   </div>
 
   <!-- Session View -->
@@ -249,6 +218,38 @@
     <button type="button" id="disconnect-btn">Disconnect</button>
 
     <div id="session-error" class="error" style="display:none"></div>
+  </div>
+
+  <!-- Settings Panel Overlay -->
+  <div id="settings-panel" class="modal-overlay" style="display:none">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button type="button" id="settings-close-btn" class="icon-btn" title="Close">&times;</button>
+      </div>
+
+      <form id="settings-form" class="modal-body">
+        <label for="settings-display-name">Display Name</label>
+        <input type="text" id="settings-display-name" placeholder="Your name" required autocomplete="off">
+
+        <div class="remember-row">
+          <input type="checkbox" id="settings-telemetry" checked>
+          <label for="settings-telemetry" class="remember-label">Save debug log locally</label>
+        </div>
+
+        <div class="remember-row">
+          <input type="checkbox" id="settings-log-sharing">
+          <label for="settings-log-sharing" class="remember-label">Peer log streaming (share &amp; view live logs in session)</label>
+        </div>
+
+        <div class="remember-row">
+          <input type="checkbox" id="settings-remember" checked>
+          <label for="settings-remember" class="remember-label">Remember settings</label>
+        </div>
+
+        <button type="submit" id="settings-done-btn">Done</button>
+      </form>
+    </div>
   </div>
 
   <!-- Plugin Install Error Modal -->
