@@ -756,7 +756,7 @@ async function setupListeners() {
     const peers = event.payload.peers;
     const tbody = document.getElementById('network-table-body');
     if (peers.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">No peers connected</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No peers connected</td></tr>';
       return;
     }
     tbody.innerHTML = peers.map(p => {
@@ -765,6 +765,14 @@ async function setupListeners() {
         : escapeHtml(p.peer_id.slice(0, 8));
       const slot = p.slot != null ? `Slot ${p.slot}` : '-';
       const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '-';
+      // Health: frames received / frames remote sent (percentage)
+      let health = '-';
+      let healthClass = '';
+      if (p.intervals_sent_remote > 0) {
+        const pct = p.interval_pct;
+        health = `${p.audio_recv}/${p.intervals_sent_remote} (${pct.toFixed(1)}%)`;
+        healthClass = pct >= 98 ? 'health-good' : pct >= 90 ? 'health-warn' : 'health-bad';
+      }
       return `<tr>
         <td>${name}</td>
         <td>${slot}</td>
@@ -773,6 +781,7 @@ async function setupListeners() {
         <td class="net-state net-${escapeHtml(p.dc_audio_state)}">${escapeHtml(p.dc_audio_state)}</td>
         <td>${rtt}</td>
         <td>${p.audio_recv}</td>
+        <td class="${healthClass}">${health}</td>
       </tr>`;
     }).join('');
   }));

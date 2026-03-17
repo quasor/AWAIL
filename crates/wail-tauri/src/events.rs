@@ -133,6 +133,16 @@ pub struct PeerNetworkInfo {
     pub rtt_ms: Option<f64>,
     /// Total audio intervals received from this peer.
     pub audio_recv: u64,
+    /// How many intervals the remote says it has sent (from their AudioStatus).
+    pub intervals_sent_remote: u64,
+    /// Delivery percentage: `audio_recv / intervals_sent_remote * 100`.
+    pub interval_pct: f64,
+    /// Cumulative frames expected across all assembled intervals.
+    pub frames_expected: u64,
+    /// Cumulative frames actually received (non-gap).
+    pub frames_received: u64,
+    /// Frame delivery percentage: `frames_received / frames_expected * 100`.
+    pub frame_pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

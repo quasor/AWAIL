@@ -7422,6 +7422,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wail-audio",
+ "wail-core",
  "wail-net",
 ]
 

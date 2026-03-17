@@ -754,6 +754,21 @@ summary:hover {
   color: var(--fg-muted);
 }
 
+.health-good {
+  color: var(--state-ok);
+  font-family: var(--font-mono);
+}
+
+.health-warn {
+  color: var(--state-warn);
+  font-family: var(--font-mono);
+}
+
+.health-bad {
+  color: var(--state-error);
+  font-family: var(--font-mono);
+}
+
 /* ================================================================
    LOG PANEL
    ================================================================ */

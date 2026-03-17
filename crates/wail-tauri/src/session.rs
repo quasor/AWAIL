@@ -217,6 +217,7 @@ async fn session_loop(
     let mut audio_bytes_sent: u64 = 0;
     let mut audio_intervals_sent: u64 = 0;
     let mut audio_bytes_recv: u64 = 0;
+    let mut audio_status_seq: u64 = 0;
     // Local send plugin tracking
     let mut local_send_streams: HashMap<usize, u16> = HashMap::new(); // conn_id → stream_index
     let mut local_send_active: HashSet<u16> = HashSet::new(); // streams that sent audio this tick
@@ -870,13 +871,18 @@ async fn session_loop(
                         }
                     }
 
-                    SyncMessage::AudioStatus { audio_dc_open, intervals_sent, intervals_received, plugin_connected } => {
-                        let name = peers.get(&from).and_then(|p| p.display_name.as_deref()).unwrap_or(&from);
-                        debug!("[REMOTE {name}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
+                    SyncMessage::AudioStatus { audio_dc_open, intervals_sent, intervals_received, plugin_connected, .. } => {
+                        // Track how many intervals the remote says it has sent
+                        let name = peers.get(&from).and_then(|p| p.display_name.as_deref()).map(|s| s.to_string());
+                        let name_ref = name.as_deref().unwrap_or(&from);
+                        debug!("[REMOTE {name_ref}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
+                        if let Some(peer) = peers.get_mut(&from) {
+                            peer.remote_intervals_sent = intervals_sent;
+                        }
                         let cur = (audio_dc_open, plugin_connected);
                         if peer_audio_status.get(from.as_str()).copied() != Some(cur) {
                             peer_audio_status.insert(from.clone(), cur);
-                            ui_info!(&app, "[REMOTE {name}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
+                            ui_info!(&app, "[REMOTE {name_ref}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
                         }
                     }
 
@@ -1207,6 +1213,20 @@ async fn session_loop(
                         .filter_map(|p| {
                             let (ice, dc_sync, dc_audio) = mesh.peer_network_state(p)?;
                             let ps = peers.get(p);
+                            let recv_count = ps.map_or(0, |s| s.audio_recv_count);
+                            let remote_sent = ps.map_or(0, |s| s.remote_intervals_sent);
+                            let interval_pct = if remote_sent > 0 {
+                                recv_count as f64 / remote_sent as f64 * 100.0
+                            } else {
+                                100.0
+                            };
+                            let fe = ps.map_or(0, |s| s.total_frames_expected);
+                            let fr = ps.map_or(0, |s| s.total_frames_received);
+                            let frame_pct = if fe > 0 {
+                                fr as f64 / fe as f64 * 100.0
+                            } else {
+                                100.0
+                            };
                             Some(PeerNetworkInfo {
                                 peer_id: p.clone(),
                                 display_name: ps.and_then(|s| s.display_name.clone()),
@@ -1215,7 +1235,12 @@ async fn session_loop(
                                 dc_sync_state: dc_sync,
                                 dc_audio_state: dc_audio,
                                 rtt_ms: clock.rtt_us(p).map(|rtt| rtt as f64 / 1000.0),
-                                audio_recv: ps.map_or(0, |s| s.audio_recv_count),
+                                audio_recv: recv_count,
+                                intervals_sent_remote: remote_sent,
+                                interval_pct,
+                                frames_expected: fe,
+                                frames_received: fr,
+                                frame_pct,
                             })
                         })
                         .collect();
@@ -1263,11 +1288,13 @@ async fn session_loop(
                     );
 
                     // Broadcast audio pipeline status to remote peers
+                    audio_status_seq += 1;
                     let status_msg = SyncMessage::AudioStatus {
                         audio_dc_open: dc_open,
                         intervals_sent: audio_intervals_sent,
                         intervals_received: audio_intervals_received,
                         plugin_connected: !ipc_pool.is_empty() || test_mode,
+                        seq: audio_status_seq,
                     };
                     mesh.broadcast(&status_msg).await;
                 }

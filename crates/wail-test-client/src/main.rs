@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +13,7 @@ use wail_audio::codec::AudioEncoder;
 use wail_audio::wire::AudioFrameWire;
 use wail_audio::AudioFrame;
 use wail_core::protocol::SyncMessage;
+use wail_core::IntervalTracker;
 use wail_net::{fetch_metered_ice_servers, metered_stun_fallback, MeshEvent, PeerMesh};
 
 const SAMPLE_RATE: u32 = 48000;
@@ -32,6 +33,10 @@ const SCALE: [f32; 5] = [
 ];
 
 const NOTE_NAMES: [&str; 5] = ["A3", "C4", "D4", "E4", "G4"];
+
+/// Per-note amplitude multipliers (relative to --amplitude).
+/// Descending from root to fifth so each note is distinguishable by volume.
+const NOTE_AMPLITUDES: [f32; 5] = [1.0, 0.85, 0.7, 0.55, 0.4];
 
 #[derive(Parser)]
 #[command(
@@ -110,12 +115,6 @@ fn now_us() -> i64 {
         .as_micros() as i64
 }
 
-/// Derive interval index from Link beat position.
-fn beat_to_interval(beat: f64, bars: u32, quantum: f64) -> i64 {
-    let beats_per_interval = bars as f64 * quantum;
-    (beat / beats_per_interval).floor() as i64
-}
-
 /// Derive which bar within the current interval from Link beat position.
 fn beat_to_bar_in_interval(beat: f64, bars: u32, quantum: f64) -> u32 {
     let beats_per_interval = bars as f64 * quantum;
@@ -143,8 +142,12 @@ async fn main() -> Result<()> {
     println!("BPM:        {}", args.bpm);
     println!("Bars:       {} (quantum {})", args.bars, args.quantum);
     println!(
-        "Scale:      {} {} {} {} {} (A minor pentatonic)",
-        NOTE_NAMES[0], NOTE_NAMES[1], NOTE_NAMES[2], NOTE_NAMES[3], NOTE_NAMES[4]
+        "Scale:      {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) (A minor pentatonic)",
+        NOTE_NAMES[0], NOTE_AMPLITUDES[0] * 100.0,
+        NOTE_NAMES[1], NOTE_AMPLITUDES[1] * 100.0,
+        NOTE_NAMES[2], NOTE_AMPLITUDES[2] * 100.0,
+        NOTE_NAMES[3], NOTE_AMPLITUDES[3] * 100.0,
+        NOTE_NAMES[4], NOTE_AMPLITUDES[4] * 100.0,
     );
     println!("Amplitude:  {}", args.amplitude);
     if args.echo {
@@ -218,8 +221,14 @@ async fn main() -> Result<()> {
     // Track which peers we've already greeted to avoid Hello ping-pong storms.
     let mut greeted_peers: HashSet<String> = HashSet::new();
 
+    // Per-peer audio health: frames received from each peer vs what they report sending.
+    let mut peer_frames_recv: HashMap<String, u64> = HashMap::new();
+    let mut peer_remote_sent: HashMap<String, u64> = HashMap::new();
+    let mut peer_names: HashMap<String, String> = HashMap::new();
+    let mut last_health_print = Instant::now();
+
     // Track interval/bar transitions from Link beat position.
-    let mut prev_interval: Option<i64> = None;
+    let mut interval_tracker = IntervalTracker::new(args.bars, args.quantum);
     let mut prev_bar: Option<u32> = None;
     let mut frame_in_interval: u32 = 0;
 
@@ -236,35 +245,29 @@ async fn main() -> Result<()> {
                 let beat = session_state.beat_at_time(time, args.quantum);
                 let bpm = session_state.tempo();
 
-                let interval_index = beat_to_interval(beat, args.bars, args.quantum);
+                let interval_index = interval_tracker.interval_index(beat);
                 let bar_in_interval = beat_to_bar_in_interval(beat, args.bars, args.quantum);
 
-                // Detect interval boundary.
-                let is_new_interval = match prev_interval {
-                    Some(prev) => prev != interval_index,
-                    None => true,
-                };
-
-                if is_new_interval {
-                    if let Some(_prev_idx) = prev_interval {
+                // Detect interval boundary (monotonic guard prevents flapping).
+                if let Some(idx) = interval_tracker.update(beat) {
+                    if interval_tracker.current_index().unwrap_or(0) > 0 && idx > 0 {
                         intervals_sent += 1;
                         let elapsed = start_time.elapsed();
                         println!(
                             "Interval {} complete ({frame_in_interval} frames, {intervals_sent} total, {elapsed:.0?} elapsed)",
-                            _prev_idx,
+                            idx - 1,
                         );
-
-                        // Broadcast interval boundary sync.
-                        mesh.broadcast(&SyncMessage::IntervalBoundary { index: interval_index }).await;
                     }
+
+                    // Broadcast interval boundary sync.
+                    mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
                     frame_in_interval = 0;
-                    prev_interval = Some(interval_index);
                     prev_bar = None;
 
                     // Log the new interval's first note.
                     let note_idx = (bar_in_interval as usize) % 5;
                     println!(
-                        "Bar 1: {} ({:.0} Hz)  [interval {interval_index}, beat {beat:.1}, {bpm:.1} BPM, Link peers: {}]",
+                        "Bar 1: {} ({:.0} Hz)  [interval {idx}, beat {beat:.1}, {bpm:.1} BPM, Link peers: {}]",
                         NOTE_NAMES[note_idx],
                         SCALE[note_idx],
                         link.num_peers(),
@@ -296,8 +299,9 @@ async fn main() -> Result<()> {
                 let note_idx = (global_bar % 5) as usize;
                 let freq = if args.constant { 440.0 } else { SCALE[note_idx] };
 
-                // Generate PCM and encode to Opus.
-                let pcm = generate_sine_frame(freq, &mut phase, amplitude);
+                // Generate PCM and encode to Opus (per-note amplitude scaling).
+                let note_amplitude = amplitude * NOTE_AMPLITUDES[note_idx];
+                let pcm = generate_sine_frame(freq, &mut phase, note_amplitude);
                 let opus_data = encoder.encode_frame(&pcm)?;
 
                 // Compute frames_per_interval for the is_final header.
@@ -325,13 +329,29 @@ async fn main() -> Result<()> {
                 mesh.broadcast_audio(&wire_bytes).await;
 
                 frame_in_interval += 1;
+
+                // Print per-peer health every 5 seconds.
+                if last_health_print.elapsed() >= Duration::from_secs(5) && !peer_remote_sent.is_empty() {
+                    last_health_print = Instant::now();
+                    for (pid, &remote_sent) in &peer_remote_sent {
+                        let local_recv = peer_frames_recv.get(pid).copied().unwrap_or(0);
+                        let pct = if remote_sent > 0 {
+                            local_recv as f64 / remote_sent as f64 * 100.0
+                        } else {
+                            100.0
+                        };
+                        let name = peer_names.get(pid).map(|s| s.as_str()).unwrap_or(&pid[..pid.len().min(8)]);
+                        println!("[{name}] health: {local_recv}/{remote_sent} frames ({pct:.1}%)");
+                    }
+                }
             }
 
             Some((from, msg)) = sync_rx.recv() => {
-                handle_sync(&mesh, &from, &msg, &peer_id, &identity, &args.name, &mut greeted_peers).await;
+                handle_sync(&mesh, &from, &msg, &peer_id, &identity, &args.name, &mut greeted_peers, &link, &mut session_state, &mut interval_tracker, &mut peer_remote_sent, &mut peer_names).await;
             }
 
             Some((from, data)) = audio_rx.recv() => {
+                *peer_frames_recv.entry(from.clone()).or_insert(0) += 1;
                 if args.echo {
                     // Echo received audio back on stream 1.
                     // Only echo stream 0 to avoid infinite loops between test clients.
@@ -431,6 +451,11 @@ async fn handle_sync(
     our_identity: &str,
     our_name: &str,
     greeted_peers: &mut HashSet<String>,
+    link: &AblLink,
+    session_state: &mut SessionState,
+    interval_tracker: &mut IntervalTracker,
+    peer_remote_sent: &mut HashMap<String, u64>,
+    peer_names: &mut HashMap<String, String>,
 ) {
     match msg {
         SyncMessage::Ping { id, sent_at_us } => {
@@ -451,6 +476,9 @@ async fn handle_sync(
                 name = ?display_name,
                 "Received Hello"
             );
+            if let Some(name) = display_name {
+                peer_names.insert(from.to_string(), name.clone());
+            }
             // Only respond once per peer to avoid Hello ping-pong storms.
             if greeted_peers.insert(peer_id.clone()) {
                 mesh.send_to(
@@ -464,6 +492,22 @@ async fn handle_sync(
                 .await
                 .ok();
             }
+        }
+        SyncMessage::TempoChange { bpm, .. } => {
+            info!(peer = %from, bpm, "Applying remote tempo change");
+            let time = link.clock_micros();
+            link.capture_app_session_state(session_state);
+            session_state.set_tempo(*bpm, time);
+            link.commit_app_session_state(session_state);
+        }
+        SyncMessage::IntervalBoundary { index } => {
+            if interval_tracker.current_index().map_or(true, |l| *index > l) {
+                info!(local = ?interval_tracker.current_index(), remote = index, peer = %from, "Syncing interval index");
+                interval_tracker.sync_to(*index);
+            }
+        }
+        SyncMessage::AudioStatus { intervals_sent, .. } => {
+            peer_remote_sent.insert(from.to_string(), *intervals_sent);
         }
         _ => {}
     }

@@ -25,6 +25,10 @@ pub struct AssembledInterval {
     /// Matches the format returned by [`crate::AudioEncoder::encode_interval`]
     /// and consumed by [`crate::AudioDecoder::decode_interval`].
     pub opus_data: Vec<u8>,
+    /// Total frames declared by the sender (from `total_frames` in the final frame).
+    pub frames_expected: u32,
+    /// Frames actually received (non-gap). `frames_expected - frames_received` = dropped.
+    pub frames_received: u32,
 }
 
 /// Assembles WAIF streaming frames into complete Opus interval blobs.
@@ -94,11 +98,13 @@ impl FrameAssembler {
             // Assemble into length-prefixed format:
             // [u32 LE frame_count][u16 LE len][opus bytes]...
             let mut opus_data = Vec::new();
+            let mut received: u32 = 0;
             opus_data.extend_from_slice(&(total as u32).to_le_bytes());
             for i in 0..total {
                 if let Some(Some(data)) = coll.frames.get(i) {
                     opus_data.extend_from_slice(&(data.len() as u16).to_le_bytes());
                     opus_data.extend_from_slice(data);
+                    received += 1;
                 } else {
                     // Missing frame — insert zero-length entry; decoder treats as gap
                     opus_data.extend_from_slice(&0u16.to_le_bytes());
@@ -115,6 +121,8 @@ impl FrameAssembler {
                 quantum: coll.quantum,
                 bars: coll.bars,
                 opus_data,
+                frames_expected: total as u32,
+                frames_received: received,
             });
         }
 
@@ -170,6 +178,8 @@ mod tests {
             bars: 4,
         });
         let assembled = result.expect("should assemble on final frame");
+        assert_eq!(assembled.frames_expected, 3);
+        assert_eq!(assembled.frames_received, 2); // frame 1 was missing
 
         // Verify the blob: frame_count=3, frame0=real, frame1=zero-length, frame2=real
         let blob = &assembled.opus_data;
