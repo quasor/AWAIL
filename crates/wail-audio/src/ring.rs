@@ -110,8 +110,6 @@ pub struct IntervalRing {
     /// Needed because audio arrives keyed by session-scoped peer_id, but SlotTable
     /// uses persistent client_id.
     peer_identity_map: Vec<(String, String)>,
-    /// Last observed beat position — used to detect backward jumps (transport restart).
-    last_beat_position: f64,
 }
 
 /// A completed local recording ready for encoding.
@@ -170,7 +168,6 @@ impl IntervalRing {
             peer_slots,
             slot_table: SlotTable::new(),
             peer_identity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
-            last_beat_position: 0.0,
         }
     }
 
@@ -203,27 +200,6 @@ impl IntervalRing {
                 self.spare_record = Vec::with_capacity(self.slot_capacity);
             }
         }
-
-        // Detect beat position regression: if beat jumped backward by more than
-        // 1 beat, the DAW transport was restarted or seeked. Reset positional state
-        // so playback and recording start fresh from the new position.
-        if self.last_beat_position > 0.0 && beat_position < self.last_beat_position - 1.0 {
-            tracing::info!(
-                prev_beat = %format!("{:.2}", self.last_beat_position),
-                new_beat = %format!("{:.2}", beat_position),
-                "Beat position regression detected — resetting interval tracking"
-            );
-            self.record_pos = 0;
-            self.record_slot.clear();
-            self.playback_pos = 0;
-            self.playback_len = 0;
-            self.current_interval = None;
-            self.playback_interval = None;
-            for slot in &mut self.peer_slots {
-                slot.read_pos = 0;
-            }
-        }
-        self.last_beat_position = beat_position;
 
         let interval_index = self.beat_to_interval(beat_position);
         let mut boundary_crossed = None;
@@ -384,7 +360,6 @@ impl IntervalRing {
         }
         self.slot_table.clear();
         self.peer_identity_map.clear();
-        self.last_beat_position = 0.0;
     }
 
     /// Reset interval tracking and buffer positions without clearing peer state.
@@ -400,7 +375,6 @@ impl IntervalRing {
         self.current_interval = None;
         self.playback_interval = None;
         self.completed.clear();
-        self.last_beat_position = 0.0;
         for slot in &mut self.peer_slots {
             slot.read_pos = 0;
         }
@@ -2179,44 +2153,33 @@ mod tests {
         );
     }
 
-    // --- Transport restart / beat regression ---
+    // --- Transport restart ---
 
     #[test]
-    fn beat_regression_resets_positions() {
+    fn loop_playback_does_not_reset_positions() {
         let mut ring = make_ring();
         let input = vec![0.5f32; 256];
         let mut output = vec![0.0f32; 256];
 
-        // Advance through beats 0, 4, 8, 12 (all within interval 0)
+        // Advance through a full interval
         ring.process(&input, &mut output, 0.0);
         ring.process(&input, &mut output, 4.0);
         ring.process(&input, &mut output, 8.0);
         ring.process(&input, &mut output, 12.0);
 
         assert_eq!(ring.current_interval(), Some(0));
-        assert!(ring.record_position() > 0, "Should have recorded samples");
+        let pos_before = ring.record_position();
+        assert!(pos_before > 0, "Should have recorded samples");
 
-        // Simulate transport restart: beat jumps back to 0
+        // Simulate DAW loop: beat jumps back to 0 while transport stays playing.
+        // This must NOT reset positions — only explicit reset_transport() should.
         ring.process(&input, &mut output, 0.0);
 
-        // Regression should have cleared current_interval (then re-set it via None branch)
-        assert_eq!(ring.current_interval(), Some(0));
-        // Record position should be just the last buffer (fresh start + one buffer)
-        assert_eq!(ring.record_position(), 256);
-    }
-
-    #[test]
-    fn no_false_regression_on_normal_advance() {
-        let mut ring = make_ring();
-        let input = vec![0.5f32; 256];
-        let mut output = vec![0.0f32; 256];
-
-        ring.process(&input, &mut output, 0.0);
-        ring.process(&input, &mut output, 4.0);
-        ring.process(&input, &mut output, 8.0);
-
-        // Record position should accumulate normally (no reset)
-        assert_eq!(ring.record_position(), 256 * 3);
+        // Record position should continue accumulating (loop did not reset)
+        assert!(
+            ring.record_position() > pos_before,
+            "Loop boundary should not reset record position"
+        );
     }
 
     #[test]
