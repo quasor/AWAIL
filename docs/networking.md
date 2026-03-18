@@ -87,6 +87,7 @@ All signaling happens over a single WebSocket connection per client. Messages ar
 | `join` | Join a room with peer_id, password, stream_count, display_name |
 | `signal` | Relay a signaling message (offer/answer/ICE) to a specific peer |
 | `leave` | Leave the current room |
+| `metrics_report` | Report audio frame counts and pipeline state for session metrics (not relayed to peers) |
 
 | Type (server→client) | Description |
 |----------------------|-------------|
@@ -115,7 +116,52 @@ The server sends WebSocket pings every 15 seconds. The client's pong response up
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/rooms` | List public rooms (excludes password-protected rooms) |
+| `GET` | `/metrics` | JSON snapshot of active + completed session metrics (supports `?room=` filter) |
+| `GET` | `/metrics/dashboard` | Live HTML dashboard with WebSocket auto-refresh |
+| `WS` | `/metrics/ws` | Streaming metrics JSON every 2 seconds (supports `?room=` filter) |
 | `GET` | `/health` | Health check |
+
+### Session metrics
+
+The signaling server tracks aggregate session metrics to answer: are clients establishing DataChannels and is audio flowing?
+
+**Session lifecycle.** A session starts when the 2nd peer joins a room (peer count reaches 2+) and ends when the count drops below 2. Each session tracks which peers participated, the session duration, and per-direction audio frame drop counts.
+
+**Phases.** Each session has two phases:
+
+- **Joining** — from session start until ALL peers report `dc_open=true` AND `plugin_connected=true`. This captures the setup period (ICE negotiation, DataChannel open, plugin attachment).
+- **Playing** — after the joining→playing transition, when all peers have established DataChannels and have transport playing. This is the steady-state audio flow period.
+
+Frame drops are tracked independently per phase so you can distinguish setup-related drops from network-quality drops.
+
+**Per-direction tracking.** For each unique direction (e.g., Peer1→Peer2 and Peer2→Peer1), the server tracks:
+
+- `frames_expected` — total 20ms audio frames the receiver expected from the sender
+- `frames_received` — total frames actually received
+- `frames_dropped` — `expected - received`
+
+**Client reporting.** Clients send a `metrics_report` message to the signaling server every 2 seconds (on the existing status tick). This message includes:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `dc_open` | `bool` | Whether the audio DataChannel is open |
+| `plugin_connected` | `bool` | Whether a send/recv plugin is connected via IPC |
+| `per_peer` | `map<peer_id, {frames_expected, frames_received}>` | Cumulative frame counts per remote peer |
+
+The `per_peer` values are cumulative. The server computes playing-phase-only deltas by snapshotting values at the joining→playing transition.
+
+**CLI tool.** `signaling-server/cmd/wail-metrics/` is a standalone Go binary that queries the `/metrics` endpoint:
+
+```sh
+# Table-formatted output
+wail-metrics -server https://signal.wail.live
+wail-metrics -server https://signal.wail.live -room my-room
+
+# Raw JSON
+wail-metrics -json
+```
+
+**Live dashboard.** Visit `/metrics/dashboard` on the signaling server for a real-time HTML dashboard that streams metrics via WebSocket every 2 seconds. Supports a `?room=` query parameter to filter by room. The dashboard auto-reconnects on disconnect.
 
 ---
 
