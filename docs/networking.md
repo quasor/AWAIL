@@ -140,7 +140,7 @@ Frame drops are tracked independently per phase so you can distinguish setup-rel
 - `frames_received` — total WAIF frames actually received (non-gap)
 - `frames_dropped` — `expected - received`
 
-Note: these counts come from `FrameAssembler` in `wail-audio`, which tracks gaps within assembled intervals. A "frame" here is a single 20ms WAIF streaming frame. Frames dropped at the DataChannel/backpressure level before reaching `FrameAssembler` are not counted (see networking.md §8 "Audio channel drop with no feedback").
+Note: frame counts come from `peek_waif_header` in session.rs, which inspects WAIF headers as they pass through (zero-copy). A "frame" here is a single 20ms WAIF streaming frame. DataChannel backpressure drops are tracked separately via the `dc_drops` metric.
 
 **Client reporting.** Clients send a `metrics_report` message to the signaling server every 2 seconds (on the existing status tick). This message includes:
 
@@ -148,9 +148,25 @@ Note: these counts come from `FrameAssembler` in `wail-audio`, which tracks gaps
 |-------|------|-------------|
 | `dc_open` | `bool` | Whether the audio DataChannel is open |
 | `plugin_connected` | `bool` | Whether a send/recv plugin is connected via IPC |
-| `per_peer` | `map<peer_id, {frames_expected, frames_received}>` | Cumulative frame counts per remote peer |
+| `per_peer` | `map<peer_id, PeerFrameReport>` | Cumulative frame counts and network health per remote peer |
+| `ipc_drops` | `u64` | Cumulative IPC channel-full drops (plugin → app direction) |
+| `boundary_drift_us` | `Option<i64>` | Last interval boundary timing drift (actual − expected gap, µs) |
 
-The `per_peer` values are cumulative. The server computes playing-phase-only deltas by snapshotting values at the joining→playing transition.
+**Per-peer fields** (`PeerFrameReport`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `frames_expected` | `u64` | Cumulative frames expected (from final WAIF frame `total_frames`) |
+| `frames_received` | `u64` | Cumulative WAIF frames actually received |
+| `rtt_us` | `Option<i64>` | Median RTT to this peer (µs, latest value) |
+| `jitter_us` | `Option<i64>` | Jitter: mean absolute deviation from median RTT (µs) |
+| `dc_drops` | `u64` | Cumulative DataChannel backpressure drops (audio receiver channel full) |
+| `late_frames` | `u64` | Cumulative WAIF frames for already-passed intervals |
+| `decode_failures` | `u64` | Cumulative Opus decode failures (reported by recv plugin via IPC_TAG_METRICS) |
+
+The cumulative values (`frames_expected`, `frames_received`, `dc_drops`, `late_frames`, `decode_failures`) support delta computation at phase transitions. The point-in-time values (`rtt_us`, `jitter_us`) are overwritten on each report. All new fields use `#[serde(default)]` for backward compatibility with older clients.
+
+**Frame counting.** Session.rs parses WAIF frame headers as they pass through (zero-copy `peek_waif_header`) to track `frames_expected` and `frames_received`. The final frame of each interval declares `total_frames`, which is added to `frames_expected`. Each received WAIF frame increments `frames_received`. This replaces the zombie counters that were previously declared but never incremented.
 
 **CLI tool.** `signaling-server/cmd/wail-metrics/` is a standalone Go binary that queries the `/metrics` endpoint:
 

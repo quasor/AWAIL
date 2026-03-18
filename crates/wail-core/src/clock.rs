@@ -97,8 +97,92 @@ impl ClockSync {
         self.per_peer.get(peer_id).map(|c| c.rtt_us)
     }
 
+    /// Jitter estimate: mean absolute deviation from median RTT (microseconds).
+    /// Returns `None` if fewer than 2 samples have been collected.
+    pub fn jitter_us(&self, peer_id: &str) -> Option<i64> {
+        let clock = self.per_peer.get(peer_id)?;
+        if clock.samples.len() < 2 {
+            return None;
+        }
+        let median = clock.rtt_us;
+        let mad = clock
+            .samples
+            .iter()
+            .map(|s| (s - median).abs())
+            .sum::<i64>()
+            / clock.samples.len() as i64;
+        Some(mad)
+    }
+
     /// Ping interval in milliseconds.
     pub fn ping_interval_ms() -> u64 {
         PING_INTERVAL_MS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_zero_with_identical_samples() {
+        let mut clock = ClockSync::new();
+        // Manually inject identical RTT samples
+        for _ in 0..4 {
+            clock.handle_pong("peer-a", clock.now_us() - 10_000, 0);
+        }
+        // All samples are ~10ms, so jitter should be near zero
+        let jitter = clock.jitter_us("peer-a").unwrap();
+        // Allow small variance from timing
+        assert!(jitter < 500, "jitter should be near zero, got {jitter}");
+    }
+
+    #[test]
+    fn jitter_none_with_insufficient_samples() {
+        let mut clock = ClockSync::new();
+        clock.handle_pong("peer-a", clock.now_us() - 10_000, 0);
+        assert_eq!(clock.jitter_us("peer-a"), None);
+    }
+
+    #[test]
+    fn jitter_none_for_unknown_peer() {
+        let clock = ClockSync::new();
+        assert_eq!(clock.jitter_us("unknown"), None);
+    }
+
+    #[test]
+    fn jitter_positive_with_varied_samples() {
+        let mut clock = ClockSync::new();
+        let peer_clock = clock.per_peer.entry("peer-a".to_string()).or_insert(PeerClock {
+            samples: VecDeque::with_capacity(WINDOW_SIZE),
+            rtt_us: 0,
+        });
+        // Insert known RTT samples: 10, 20, 30, 40 ms
+        for &rtt in &[10_000i64, 20_000, 30_000, 40_000] {
+            peer_clock.samples.push_back(rtt);
+        }
+        peer_clock.rtt_us = ClockSync::median_of(
+            &peer_clock.samples.iter().copied().collect::<Vec<_>>(),
+        );
+        // median of [10000, 20000, 30000, 40000] = 30000 (index 2 of sorted)
+        // MAD = (|10000-30000| + |20000-30000| + |30000-30000| + |40000-30000|) / 4
+        //     = (20000 + 10000 + 0 + 10000) / 4 = 10000
+        let jitter = clock.jitter_us("peer-a").unwrap();
+        assert_eq!(jitter, 10_000);
+    }
+
+    #[test]
+    fn rtt_us_returns_none_for_unknown_peer() {
+        let clock = ClockSync::new();
+        assert_eq!(clock.rtt_us("nonexistent"), None);
+    }
+
+    #[test]
+    fn rtt_us_updates_on_pong() {
+        let mut clock = ClockSync::new();
+        let sent = clock.now_us() - 5000;
+        clock.handle_pong("peer-a", sent, 0);
+        let rtt = clock.rtt_us("peer-a").unwrap();
+        assert!(rtt >= 4000 && rtt <= 6000, "rtt should be ~5000, got {rtt}");
     }
 }

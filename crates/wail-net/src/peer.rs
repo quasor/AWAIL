@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
@@ -25,8 +26,10 @@ struct AudioReassembly {
 
 /// Create a shared audio message handler that reassembles chunked messages.
 /// Returns a closure suitable for `dc.on_message()`.
+/// The `drop_counter` is incremented each time a frame is dropped due to backpressure.
 fn make_audio_handler(
     tx: mpsc::Sender<Vec<u8>>,
+    drop_counter: Arc<AtomicU64>,
 ) -> (
     Arc<Mutex<Option<AudioReassembly>>>,
     impl Fn(DataChannelMessage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync + 'static,
@@ -37,6 +40,7 @@ fn make_audio_handler(
     let handler = move |msg: DataChannelMessage| {
         let tx = tx.clone();
         let reassembly = reassembly_clone.clone();
+        let drop_counter = drop_counter.clone();
         Box::pin(async move {
             let data = msg.data.to_vec();
 
@@ -63,6 +67,7 @@ fn make_audio_handler(
                     *guard = None;
                     debug!("[DC AUDIO IN] reassembled chunked {} bytes", complete.len());
                     if let Err(TrySendError::Full(_)) = tx.try_send(complete) {
+                        drop_counter.fetch_add(1, Ordering::Relaxed);
                         warn!("[DC AUDIO IN] channel full — dropping reassembled frame");
                     }
                     // TrySendError::Closed: receiver gone (disconnecting) — silently discard
@@ -71,6 +76,7 @@ fn make_audio_handler(
                 // Non-chunked message (small enough to fit in one DC message)
                 debug!("[DC AUDIO IN] non-chunked {} bytes", data.len());
                 if let Err(TrySendError::Full(_)) = tx.try_send(data) {
+                    drop_counter.fetch_add(1, Ordering::Relaxed);
                     warn!("[DC AUDIO IN] channel full — dropping frame");
                 }
                 // TrySendError::Closed: receiver gone (disconnecting) — silently discard
@@ -139,6 +145,8 @@ pub struct PeerConnection {
     remote_desc_set: bool,
     /// Failure signal — sends peer ID when connection or DataChannel fails
     failure_tx: mpsc::UnboundedSender<String>,
+    /// Cumulative DataChannel audio backpressure drops.
+    dc_audio_drops: Arc<AtomicU64>,
 }
 
 impl PeerConnection {
@@ -237,6 +245,7 @@ impl PeerConnection {
             pending_candidates: Vec::new(),
             remote_desc_set: false,
             failure_tx,
+            dc_audio_drops: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -281,6 +290,7 @@ impl PeerConnection {
         let dc_audio_slot = self.dc_audio.clone();
         let pending_sync = self.pending_sync.clone();
         let fail_tx = self.failure_tx.clone();
+        let dc_drops = self.dc_audio_drops.clone();
 
         self.pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let incoming_tx = incoming_tx.clone();
@@ -290,6 +300,7 @@ impl PeerConnection {
             let dc_audio_slot = dc_audio_slot.clone();
             let pending_sync = pending_sync.clone();
             let fail_tx = fail_tx.clone();
+            let dc_drops = dc_drops.clone();
             Box::pin(async move {
                 let label = dc.label().to_string();
                 info!(peer = %rpid, label = %label, "Data channel opened by remote");
@@ -366,7 +377,7 @@ impl PeerConnection {
                             Box::pin(async {})
                         }));
 
-                        let (_reassembly, handler) = make_audio_handler(audio_tx.clone());
+                        let (_reassembly, handler) = make_audio_handler(audio_tx.clone(), dc_drops);
                         dc.on_message(Box::new(handler));
                     }
                     other => {
@@ -576,10 +587,15 @@ impl PeerConnection {
             Box::pin(async {})
         }));
 
-        let (_reassembly, handler) = make_audio_handler(self.audio_tx.clone());
+        let (_reassembly, handler) = make_audio_handler(self.audio_tx.clone(), self.dc_audio_drops.clone());
         dc.on_message(Box::new(handler));
 
         let _ = self.dc_audio.set(dc);
+    }
+
+    /// Cumulative count of audio frames dropped due to DataChannel backpressure.
+    pub fn dc_audio_drops(&self) -> u64 {
+        self.dc_audio_drops.load(Ordering::Relaxed)
     }
 
     /// Check whether the audio DataChannel is in the Open state.
@@ -654,7 +670,7 @@ mod tests {
     #[tokio::test]
     async fn non_chunked_message_passes_through_as_is() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let (_reassembly, handler) = make_audio_handler(tx);
+        let (_reassembly, handler) = make_audio_handler(tx, Arc::new(AtomicU64::new(0)));
 
         let data = vec![0xAB; 100];
         handler(make_dc_msg(data.clone())).await;
@@ -667,7 +683,7 @@ mod tests {
     #[tokio::test]
     async fn message_exactly_chunk_max_without_wach_passes_through() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let (_reassembly, handler) = make_audio_handler(tx);
+        let (_reassembly, handler) = make_audio_handler(tx, Arc::new(AtomicU64::new(0)));
 
         // 1200 bytes, first four bytes are NOT "WACH"
         let data = vec![0xFF; CHUNK_MAX];
@@ -690,7 +706,7 @@ mod tests {
         let total_len = total_data.len();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let (_reassembly, handler) = make_audio_handler(tx);
+        let (_reassembly, handler) = make_audio_handler(tx, Arc::new(AtomicU64::new(0)));
 
         let chunk1 = make_wach_chunk(total_len, &total_data[..CHUNK_MAX_PAYLOAD]);
         handler(make_dc_msg(chunk1)).await;
@@ -708,7 +724,7 @@ mod tests {
         let total_len = total_data.len();
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let (_reassembly, handler) = make_audio_handler(tx);
+        let (_reassembly, handler) = make_audio_handler(tx, Arc::new(AtomicU64::new(0)));
 
         let chunk1 = make_wach_chunk(total_len, &total_data[..CHUNK_MAX_PAYLOAD]);
         let chunk2 = make_wach_chunk(total_len, &total_data[CHUNK_MAX_PAYLOAD..]);
@@ -729,7 +745,7 @@ mod tests {
         let msg2 = vec![0xBB; CHUNK_MAX + 1];
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let (_reassembly, handler) = make_audio_handler(tx);
+        let (_reassembly, handler) = make_audio_handler(tx, Arc::new(AtomicU64::new(0)));
 
         // Deliver msg1 in two chunks.
         let len1 = msg1.len();

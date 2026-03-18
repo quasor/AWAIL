@@ -473,14 +473,23 @@ impl PeerMesh {
         dc_open: bool,
         plugin_connected: bool,
         per_peer: HashMap<String, PeerFrameReport>,
+        ipc_drops: u64,
+        boundary_drift_us: Option<i64>,
     ) {
         if let Err(e) = self.signaling.outgoing_tx.send(SignalMessage::MetricsReport {
             dc_open,
             plugin_connected,
             per_peer,
+            ipc_drops,
+            boundary_drift_us,
         }) {
             tracing::warn!("failed to send metrics report: {e}");
         }
+    }
+
+    /// Get the cumulative DataChannel audio backpressure drop count for a peer.
+    pub fn dc_audio_drops(&self, peer_id: &str) -> u64 {
+        self.peers.get(peer_id).map_or(0, |pc| pc.dc_audio_drops())
     }
 
     pub fn connected_peers(&self) -> Vec<String> {

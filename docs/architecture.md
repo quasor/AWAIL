@@ -307,11 +307,25 @@ A **session** starts when the 2nd peer joins a room (≥2 peers) and ends when t
 1. **Joining** — from session start until all peers report `dc_open` and `plugin_connected`. Captures ICE negotiation, DataChannel establishment, and plugin attachment.
 2. **Playing** — steady-state audio flow after all peers are fully connected.
 
-### Per-direction frame drop tracking
+### Per-direction metrics
 
-For each unique direction (e.g., `peer1→peer2`), the server tracks `frames_expected`, `frames_received`, and `frames_dropped` independently per phase. This distinguishes setup-related drops from network-quality drops during playback. Frame counts come from `FrameAssembler` gap detection within assembled intervals — each "frame" is a 20ms WAIF streaming Opus packet.
+For each unique direction (e.g., `peer1→peer2`), the server tracks metrics independently per phase (joining vs playing). This distinguishes setup-related issues from steady-state network quality.
 
-Clients report cumulative per-peer frame counts every 2 seconds via a `metrics_report` message on the signaling WebSocket. The server computes playing-phase deltas by snapshotting values at the joining→playing transition.
+**Frame-level metrics:**
+- `frames_expected` / `frames_received` / `frames_dropped` — tracked via zero-copy WAIF header parsing (`peek_waif_header`) in session.rs as frames pass through. Each "frame" is a single 20ms WAIF streaming Opus packet.
+
+**Network health metrics (per direction):**
+- `rtt_us` — median RTT to the peer (µs), from `ClockSync` Ping/Pong
+- `jitter_us` — mean absolute deviation from median RTT (µs), the key signal for intermittent issues
+- `dc_drops` — DataChannel backpressure drops (audio receiver channel full in peer.rs)
+- `late_frames` — WAIF frames that arrived for already-passed intervals (detected in session.rs)
+- `decode_failures` — Opus decode failures reported by the recv plugin via `IPC_TAG_METRICS` (0x06)
+
+**Session-level metrics:**
+- `ipc_drops` — cumulative IPC channel-full drops (plugin → app direction)
+- `boundary_drift_us` — interval boundary timing drift (actual − expected gap, µs)
+
+Clients report cumulative per-peer metrics every 2 seconds via a `metrics_report` message on the signaling WebSocket. The server computes playing-phase deltas by snapshotting cumulative values at the joining→playing transition. Point-in-time values (RTT, jitter) are overwritten with the latest report.
 
 ### Endpoints
 

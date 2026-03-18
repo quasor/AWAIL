@@ -97,6 +97,7 @@ const IPC_TAG_PEER_JOINED: u8 = 0x02;
 const IPC_TAG_PEER_LEFT: u8 = 0x03;
 const IPC_TAG_PEER_NAME: u8 = 0x04;
 const IPC_TAG_AUDIO_FRAME: u8 = 0x05;
+const IPC_TAG_METRICS: u8 = 0x06;
 
 /// IPC message encoding for Plugin ↔ App communication.
 ///
@@ -247,6 +248,22 @@ impl IpcMessage {
         Some(payload[1..].to_vec())
     }
 
+    /// Encode a plugin metrics report: tag + decode_failures(u64 LE).
+    pub fn encode_metrics(decode_failures: u64) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(9);
+        msg.push(IPC_TAG_METRICS);
+        msg.extend_from_slice(&decode_failures.to_le_bytes());
+        msg
+    }
+
+    /// Decode a plugin metrics report. Returns `decode_failures` count.
+    pub fn decode_metrics(payload: &[u8]) -> Option<u64> {
+        if payload.len() < 9 || payload[0] != IPC_TAG_METRICS {
+            return None;
+        }
+        Some(u64::from_le_bytes(payload[1..9].try_into().ok()?))
+    }
+
     /// Get the tag byte from a payload, if any.
     pub fn tag(payload: &[u8]) -> Option<u8> {
         payload.first().copied()
@@ -259,6 +276,7 @@ pub const IPC_TAG_PEER_JOINED_PUB: u8 = IPC_TAG_PEER_JOINED;
 pub const IPC_TAG_PEER_LEFT_PUB: u8 = IPC_TAG_PEER_LEFT;
 pub const IPC_TAG_PEER_NAME_PUB: u8 = IPC_TAG_PEER_NAME;
 pub const IPC_TAG_AUDIO_FRAME_PUB: u8 = IPC_TAG_AUDIO_FRAME;
+pub const IPC_TAG_METRICS_PUB: u8 = IPC_TAG_METRICS;
 
 #[cfg(test)]
 mod tests {
@@ -578,5 +596,33 @@ mod tests {
     #[test]
     fn audio_frame_tag_constant() {
         assert_eq!(IPC_TAG_AUDIO_FRAME_PUB, 0x05);
+    }
+
+    // --- Metrics messages ---
+
+    #[test]
+    fn metrics_roundtrip() {
+        let encoded = IpcMessage::encode_metrics(42);
+        assert_eq!(encoded[0], IPC_TAG_METRICS);
+        assert_eq!(encoded.len(), 9);
+        let decoded = IpcMessage::decode_metrics(&encoded).unwrap();
+        assert_eq!(decoded, 42);
+    }
+
+    #[test]
+    fn metrics_rejects_wrong_tag() {
+        let encoded = IpcMessage::encode_audio("peer-1", &[0xAA]);
+        assert!(IpcMessage::decode_metrics(&encoded).is_none());
+    }
+
+    #[test]
+    fn metrics_rejects_short() {
+        assert!(IpcMessage::decode_metrics(&[]).is_none());
+        assert!(IpcMessage::decode_metrics(&[IPC_TAG_METRICS]).is_none());
+    }
+
+    #[test]
+    fn metrics_tag_constant() {
+        assert_eq!(IPC_TAG_METRICS_PUB, 0x06);
     }
 }

@@ -57,12 +57,19 @@ type clientMsg struct {
 	DcOpen          *bool                      `json:"dc_open,omitempty"`
 	PluginConnected *bool                      `json:"plugin_connected,omitempty"`
 	PerPeer         map[string]peerFrameReport `json:"per_peer,omitempty"`
+	IpcDrops        uint64                     `json:"ipc_drops,omitempty"`
+	BoundaryDriftUs *int64                     `json:"boundary_drift_us,omitempty"`
 }
 
 // peerFrameReport is what each client reports about a specific remote peer.
 type peerFrameReport struct {
 	FramesExpected uint64 `json:"frames_expected"`
 	FramesReceived uint64 `json:"frames_received"`
+	RttUs          *int64 `json:"rtt_us,omitempty"`
+	JitterUs       *int64 `json:"jitter_us,omitempty"`
+	DcDrops        uint64 `json:"dc_drops"`
+	LateFrames     uint64 `json:"late_frames"`
+	DecodeFailures uint64 `json:"decode_failures"`
 }
 
 // conn wraps a single WebSocket connection that has joined a room.
@@ -88,6 +95,11 @@ type directionMetrics struct {
 	FramesExpected uint64 `json:"frames_expected"`
 	FramesReceived uint64 `json:"frames_received"`
 	FramesDropped  uint64 `json:"frames_dropped"`
+	RttUs          *int64 `json:"rtt_us,omitempty"`
+	JitterUs       *int64 `json:"jitter_us,omitempty"`
+	DcDrops        uint64 `json:"dc_drops"`
+	LateFrames     uint64 `json:"late_frames"`
+	DecodeFailures uint64 `json:"decode_failures"`
 }
 
 // peerStatus tracks the last-known state of a peer in a session.
@@ -183,6 +195,12 @@ func (s *session) updateMetrics(reporter string, dcOpen, pluginConnected bool, p
 			} else {
 				dm.FramesDropped = 0
 			}
+			// Point-in-time metrics: overwrite with latest values
+			dm.RttUs = report.RttUs
+			dm.JitterUs = report.JitterUs
+			dm.DcDrops = report.DcDrops - snap.DcDrops
+			dm.LateFrames = report.LateFrames - snap.LateFrames
+			dm.DecodeFailures = report.DecodeFailures - snap.DecodeFailures
 		} else {
 			// Joining phase: use cumulative values directly.
 			dm, exists := target[dk]
@@ -197,6 +215,11 @@ func (s *session) updateMetrics(reporter string, dcOpen, pluginConnected bool, p
 			} else {
 				dm.FramesDropped = 0
 			}
+			dm.RttUs = report.RttUs
+			dm.JitterUs = report.JitterUs
+			dm.DcDrops = report.DcDrops
+			dm.LateFrames = report.LateFrames
+			dm.DecodeFailures = report.DecodeFailures
 		}
 
 		ps.lastPerPeer[remotePeer] = report
@@ -970,14 +993,24 @@ function dropClass(expected, dropped) {
   return 'drop-bad';
 }
 
+function fmtMs(us) { return us != null ? (us / 1000).toFixed(1) + 'ms' : '—'; }
+function jitterClass(us) { if (us == null) return 'no-data'; if (us <= 20000) return 'drop-ok'; if (us <= 50000) return 'drop-warn'; return 'drop-bad'; }
+function countClass(n) { return n > 0 ? 'drop-bad' : 'drop-ok'; }
+
 function renderDirections(dirs) {
   if (!dirs || Object.keys(dirs).length === 0) return '<span class="no-data">No data yet</span>';
-  let html = '<table><tr><th>Direction</th><th>Expected</th><th>Received</th><th>Dropped</th><th>Drop %</th></tr>';
+  let html = '<table><tr><th>Direction</th><th>Expected</th><th>Received</th><th>Dropped</th><th>Drop %</th><th>RTT</th><th>Jitter</th><th>DC Drops</th><th>Late</th><th>Decode Err</th></tr>';
   for (const [dir, m] of Object.entries(dirs)) {
     const pct = m.frames_expected > 0 ? (m.frames_dropped / m.frames_expected * 100).toFixed(1) : '—';
     const cls = dropClass(m.frames_expected, m.frames_dropped);
     html += '<tr><td>' + esc(dir) + '</td><td>' + m.frames_expected + '</td><td>' + m.frames_received +
-            '</td><td class="' + cls + '">' + m.frames_dropped + '</td><td class="' + cls + '">' + pct + (m.frames_expected > 0 ? '%' : '') + '</td></tr>';
+            '</td><td class="' + cls + '">' + m.frames_dropped + '</td><td class="' + cls + '">' + pct + (m.frames_expected > 0 ? '%' : '') +
+            '</td><td>' + fmtMs(m.rtt_us) +
+            '</td><td class="' + jitterClass(m.jitter_us) + '">' + fmtMs(m.jitter_us) +
+            '</td><td class="' + countClass(m.dc_drops || 0) + '">' + (m.dc_drops || 0) +
+            '</td><td class="' + countClass(m.late_frames || 0) + '">' + (m.late_frames || 0) +
+            '</td><td class="' + countClass(m.decode_failures || 0) + '">' + (m.decode_failures || 0) +
+            '</td></tr>';
   }
   html += '</table>';
   return html;
