@@ -268,6 +268,7 @@ Two independent time domains exist in the system:
 | `PeerLeft` | Server → Client | Peer disconnect notification |
 | `Signal` | Client ↔ Server ↔ Client | Relay SDP/ICE between peers |
 | `LogBroadcast` (`log`) | Client → Server → Room | Broadcast structured log entry to all room peers (opt-in) |
+| `MetricsReport` | Client → Server | Per-peer audio frame counts + pipeline state (consumed server-side, not relayed) |
 
 ## Key Design Decisions
 
@@ -294,6 +295,54 @@ Two independent time domains exist in the system:
 11. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.rs` in wail-tauri.
 
 12. **Fade-in on peer join**: When a new or reconnecting peer's first audio interval arrives, a 10ms linear ramp-from-silence is applied before mixing into the playback buffer. This prevents audible pops/clicks caused by abrupt sample onset. The fade length is clamped to the interval length for safety. After the first interval, subsequent intervals play at full amplitude with no ramping.
+
+## Session Metrics and Live Dashboard
+
+The signaling server tracks aggregate session metrics to monitor whether clients are establishing DataChannels and whether audio is flowing between peers.
+
+### Session model
+
+A **session** starts when the 2nd peer joins a room (≥2 peers) and ends when the count drops below 2. Sessions have two phases:
+
+1. **Joining** — from session start until all peers report `dc_open` and `plugin_connected`. Captures ICE negotiation, DataChannel establishment, and plugin attachment.
+2. **Playing** — steady-state audio flow after all peers are fully connected.
+
+### Per-direction metrics
+
+For each unique direction (e.g., `peer1→peer2`), the server tracks metrics independently per phase (joining vs playing). This distinguishes setup-related issues from steady-state network quality.
+
+**Frame-level metrics:**
+- `frames_expected` / `frames_received` / `frames_dropped` — tracked via zero-copy WAIF header parsing (`peek_waif_header`) in session.rs as frames pass through. Each "frame" is a single 20ms WAIF streaming Opus packet.
+
+**Network health metrics (per direction):**
+- `rtt_us` — median RTT to the peer (µs), from `ClockSync` Ping/Pong
+- `jitter_us` — mean absolute deviation from median RTT (µs), the key signal for intermittent issues
+- `dc_drops` — DataChannel backpressure drops (audio receiver channel full in peer.rs)
+- `late_frames` — WAIF frames that arrived for already-passed intervals (detected in session.rs)
+- `decode_failures` — Opus decode failures reported by the recv plugin via `IPC_TAG_METRICS` (0x06)
+
+**Session-level metrics:**
+- `ipc_drops` — cumulative IPC channel-full drops (plugin → app direction)
+- `boundary_drift_us` — interval boundary timing drift (actual − expected gap, µs)
+
+Clients report cumulative per-peer metrics every 2 seconds via a `metrics_report` message on the signaling WebSocket. The server computes playing-phase deltas by snapshotting cumulative values at the joining→playing transition. Point-in-time values (RTT, jitter) are overwritten with the latest report.
+
+### Endpoints
+
+| Path | Description |
+|------|-------------|
+| `GET /metrics` | JSON snapshot of active + completed sessions (`?room=` filter supported) |
+| `WS /metrics/ws` | Streaming metrics every 2s (`?room=` filter supported) |
+| `GET /metrics/dashboard` | Live HTML dashboard with auto-reconnecting WebSocket |
+
+### CLI tool
+
+`signaling-server/cmd/wail-metrics/` queries the `/metrics` endpoint:
+
+```sh
+wail-metrics -server https://signal.wail.live -room my-room
+wail-metrics -json   # raw JSON
+```
 
 ## CI/CD Pipeline
 

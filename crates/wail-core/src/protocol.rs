@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Messages exchanged between peers over WebRTC DataChannels.
@@ -128,6 +130,42 @@ pub enum SignalMessage {
         message: String,
         timestamp_us: u64,
     },
+    /// Metrics report sent to the signaling server for session-level aggregation.
+    /// Not relayed to other peers — consumed server-side only.
+    MetricsReport {
+        dc_open: bool,
+        plugin_connected: bool,
+        /// Per remote peer: cumulative frames expected/received (direction = remote→self).
+        per_peer: HashMap<String, PeerFrameReport>,
+        /// Cumulative IPC channel-full drops (plugin → app direction).
+        #[serde(default)]
+        ipc_drops: u64,
+        /// Interval boundary timing drift in microseconds (actual − expected gap).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boundary_drift_us: Option<i64>,
+    },
+}
+
+/// Cumulative audio frame counts and network health for one direction (remote → observer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerFrameReport {
+    pub frames_expected: u64,
+    pub frames_received: u64,
+    /// Median RTT to this peer in microseconds (latest value, not cumulative).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_us: Option<i64>,
+    /// Jitter (MAD of RTT) in microseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_us: Option<i64>,
+    /// Cumulative DataChannel backpressure drops (audio receiver channel full).
+    #[serde(default)]
+    pub dc_drops: u64,
+    /// Cumulative WAIF frames that arrived for already-passed intervals.
+    #[serde(default)]
+    pub late_frames: u64,
+    /// Cumulative Opus decode failures reported by the recv plugin.
+    #[serde(default)]
+    pub decode_failures: u64,
 }
 
 /// WebRTC signaling payloads relayed through the signaling server.
@@ -224,6 +262,54 @@ mod tests {
         let decoded: SyncMessage = serde_json::from_str(json).expect("deserialize");
         match decoded {
             SyncMessage::AudioStatus { seq, .. } => assert_eq!(seq, 0),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_frame_report_backward_compat() {
+        // Old-format JSON without new fields — all should default to 0/None
+        let json = r#"{"frames_expected":100,"frames_received":95}"#;
+        let report: PeerFrameReport = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(report.frames_expected, 100);
+        assert_eq!(report.frames_received, 95);
+        assert_eq!(report.rtt_us, None);
+        assert_eq!(report.jitter_us, None);
+        assert_eq!(report.dc_drops, 0);
+        assert_eq!(report.late_frames, 0);
+        assert_eq!(report.decode_failures, 0);
+    }
+
+    #[test]
+    fn peer_frame_report_full_roundtrip() {
+        let report = PeerFrameReport {
+            frames_expected: 200,
+            frames_received: 190,
+            rtt_us: Some(15000),
+            jitter_us: Some(3000),
+            dc_drops: 5,
+            late_frames: 2,
+            decode_failures: 1,
+        };
+        let json = serde_json::to_string(&report).expect("serialize");
+        let decoded: PeerFrameReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.rtt_us, Some(15000));
+        assert_eq!(decoded.jitter_us, Some(3000));
+        assert_eq!(decoded.dc_drops, 5);
+        assert_eq!(decoded.late_frames, 2);
+        assert_eq!(decoded.decode_failures, 1);
+    }
+
+    #[test]
+    fn metrics_report_backward_compat() {
+        // Old-format without ipc_drops and boundary_drift_us
+        let json = r#"{"type":"MetricsReport","dc_open":true,"plugin_connected":false,"per_peer":{}}"#;
+        let decoded: SignalMessage = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            SignalMessage::MetricsReport { ipc_drops, boundary_drift_us, .. } => {
+                assert_eq!(ipc_drops, 0);
+                assert_eq!(boundary_drift_us, None);
+            }
             other => panic!("unexpected variant: {other:?}"),
         }
     }

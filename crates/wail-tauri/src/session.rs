@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn, Instrument};
 
 use wail_audio::{ClientChannelMapping, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
+use wail_core::protocol::PeerFrameReport;
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
@@ -226,6 +227,10 @@ async fn session_loop(
     let mut interval_frames_recv: u64 = 0;
     let mut interval_bytes_sent: u64 = 0;
     let mut interval_bytes_recv: u64 = 0;
+    // Session-level metrics counters
+    let mut ipc_drop_count: u64 = 0;
+    let mut boundary_drift_us: Option<i64> = None;
+    let mut recv_plugin_decode_failures: u64 = 0;
 
     // IPC: listen for plugin connections.
     // Use TcpSocket builder to set SO_REUSEADDR before binding, so that reconnecting
@@ -246,6 +251,8 @@ async fn session_loop(
     let mut next_conn_id: usize = 0;
     let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<(usize, Vec<u8>)>(64);
     let (ipc_disconnect_tx, mut ipc_disconnect_rx) = mpsc::channel::<usize>(16);
+    let ipc_drop_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let recv_decode_failures = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Initialize local recording if configured
     let recorder: Option<SessionRecorder> = match recording_config {
@@ -388,11 +395,13 @@ async fn session_loop(
                         let disconnect_tx = ipc_disconnect_tx.clone();
                         let app2 = app.clone();
                         let is_send = role != IPC_ROLE_RECV;
+                        let ipc_drop_counter2 = ipc_drop_counter.clone();
+                        let recv_decode_failures2 = recv_decode_failures.clone();
                         tokio::spawn(async move {
                             let mut recv_buf = IpcRecvBuffer::new();
                             let mut buf = [0u8; 65536];
                             let mut reader = read_half;
-                            let mut logged_ipc_drop = false;
+                            let mut local_ipc_drops: u64 = 0;
                             loop {
                                 match reader.read(&mut buf).await {
                                     Ok(0) => {
@@ -407,16 +416,24 @@ async fn session_loop(
                                                 match tx.try_send((conn_id, frame)) {
                                                     Ok(()) => {}
                                                     Err(mpsc::error::TrySendError::Full(_)) => {
-                                                        if !logged_ipc_drop {
-                                                            warn!("IPC audio channel full — dropping frame (capacity=64)");
-                                                            logged_ipc_drop = true;
+                                                        local_ipc_drops += 1;
+                                                        if local_ipc_drops.is_power_of_two() {
+                                                            warn!("IPC audio channel full — {local_ipc_drops} frames dropped (capacity=64)");
                                                         }
+                                                        ipc_drop_counter2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                     }
                                                     Err(mpsc::error::TrySendError::Closed(_)) => return,
                                                 }
                                             }
+                                        } else {
+                                            // Recv plugin: check for metrics messages
+                                            recv_buf.push(&buf[..n]);
+                                            while let Some(frame) = recv_buf.next_frame() {
+                                                if let Some(failures) = wail_audio::IpcMessage::decode_metrics(&frame) {
+                                                    recv_decode_failures2.store(failures, std::sync::atomic::Ordering::Relaxed);
+                                                }
+                                            }
                                         }
-                                        // recv plugin: we only read to detect disconnect
                                     }
                                     Err(e) => {
                                         ui_warn!(&app2, "Plugin IPC read error (conn {conn_id}): {e}");
@@ -909,6 +926,21 @@ async fn session_loop(
                     let stream_id = u16::from_le_bytes([data[5], data[6]]);
                     let _ = peers.assign_slot(&from, stream_id);
                 }
+                // Track frame-level metrics from WAIF header (zero-copy peek)
+                if let Some(header) = wail_audio::peek_waif_header(&data) {
+                    if let Some(peer) = peers.get_mut(&from) {
+                        peer.total_frames_received += 1;
+                        if header.is_final {
+                            peer.total_frames_expected += header.total_frames as u64;
+                        }
+                        // Detect late frames: frames for intervals we've already passed
+                        if let Some(current_idx) = interval.current_index() {
+                            if header.interval_index < current_idx - 1 {
+                                peer.late_frames += 1;
+                            }
+                        }
+                    }
+                }
                 audio_intervals_received += 1;
                 audio_bytes_recv += data.len() as u64;
                 interval_frames_recv += 1;
@@ -988,6 +1020,13 @@ async fn session_loop(
                                 if test_mode {
                                     ui_info!(&app, "[TEST] Interval boundary {idx}: gap={gap:.2?}");
                                 }
+                                // Compute boundary drift: actual gap − expected gap
+                                if last_broadcast_bpm > 0.0 {
+                                    let beats = interval.beats_per_interval();
+                                    let expected_us = (beats / (last_broadcast_bpm / 60.0) * 1_000_000.0) as i64;
+                                    let actual_us = gap.as_micros() as i64;
+                                    boundary_drift_us = Some(actual_us - expected_us);
+                                }
                             }
                             last_boundary_time = Some(Instant::now());
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
@@ -1037,6 +1076,12 @@ async fn session_loop(
                                 let gap = last.elapsed();
                                 if test_mode {
                                     ui_info!(&app, "[TEST] Interval boundary {idx}: gap={gap:.2?}");
+                                }
+                                if last_broadcast_bpm > 0.0 {
+                                    let beats = interval.beats_per_interval();
+                                    let expected_us = (beats / (last_broadcast_bpm / 60.0) * 1_000_000.0) as i64;
+                                    let actual_us = gap.as_micros() as i64;
+                                    boundary_drift_us = Some(actual_us - expected_us);
                                 }
                             }
                             last_boundary_time = Some(Instant::now());
@@ -1297,6 +1342,31 @@ async fn session_loop(
                         seq: audio_status_seq,
                     };
                     mesh.broadcast(&status_msg).await;
+
+                    // Send metrics report to signaling server (not relayed to peers).
+                    // Reports per-peer cumulative frame counts so the server can track drops.
+                    ipc_drop_count = ipc_drop_counter.load(std::sync::atomic::Ordering::Relaxed);
+                    recv_plugin_decode_failures = recv_decode_failures.load(std::sync::atomic::Ordering::Relaxed);
+                    let mut per_peer = HashMap::new();
+                    for p in &connected {
+                        let ps = peers.get(p);
+                        per_peer.insert(p.clone(), PeerFrameReport {
+                            frames_expected: ps.map_or(0, |s| s.total_frames_expected),
+                            frames_received: ps.map_or(0, |s| s.total_frames_received),
+                            rtt_us: clock.rtt_us(p),
+                            jitter_us: clock.jitter_us(p),
+                            dc_drops: mesh.dc_audio_drops(p),
+                            late_frames: ps.map_or(0, |s| s.late_frames),
+                            decode_failures: recv_plugin_decode_failures,
+                        });
+                    }
+                    mesh.send_metrics_report(
+                        dc_open,
+                        !ipc_pool.is_empty() || test_mode,
+                        per_peer,
+                        ipc_drop_count,
+                        boundary_drift_us,
+                    );
                 }
             }
         }

@@ -263,6 +263,44 @@ impl AudioFrameWire {
     }
 }
 
+/// Minimal WAIF frame header fields extracted without allocation.
+#[derive(Debug, Clone, Copy)]
+pub struct WaifHeaderPeek {
+    pub interval_index: i64,
+    pub frame_number: u32,
+    pub is_final: bool,
+    /// Only valid when `is_final` is true.
+    pub total_frames: u32,
+}
+
+/// Zero-copy peek at a WAIF frame header. Returns `None` if the data
+/// is too short or doesn't have the WAIF magic.
+pub fn peek_waif_header(data: &[u8]) -> Option<WaifHeaderPeek> {
+    if data.len() < FRAME_HEADER_SIZE || &data[0..4] != FRAME_MAGIC {
+        return None;
+    }
+    let flags = data[4];
+    let is_final = flags & FRAME_FLAG_FINAL != 0;
+    let interval_index = i64::from_le_bytes(data[7..15].try_into().ok()?);
+    let frame_number = u32::from_le_bytes(data[15..19].try_into().ok()?);
+    let total_frames = if is_final {
+        let opus_len = u16::from_le_bytes(data[19..21].try_into().ok()?) as usize;
+        let meta_start = FRAME_HEADER_SIZE + opus_len;
+        if data.len() < meta_start + FRAME_FINAL_EXTRA {
+            return None;
+        }
+        u32::from_le_bytes(data[meta_start + 4..meta_start + 8].try_into().ok()?)
+    } else {
+        0
+    };
+    Some(WaifHeaderPeek {
+        interval_index,
+        frame_number,
+        is_final,
+        total_frames,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +591,65 @@ mod tests {
         // Truncate the final metadata
         encoded.truncate(encoded.len() - 10);
         assert!(AudioFrameWire::decode(&encoded).is_err());
+    }
+
+    // --- peek_waif_header tests ---
+
+    #[test]
+    fn peek_waif_header_non_final() {
+        let frame = crate::AudioFrame {
+            interval_index: 42,
+            stream_id: 3,
+            frame_number: 7,
+            channels: 2,
+            opus_data: vec![0xDE, 0xAD],
+            is_final: false,
+            sample_rate: 0,
+            total_frames: 0,
+            bpm: 0.0,
+            quantum: 0.0,
+            bars: 0,
+        };
+        let encoded = AudioFrameWire::encode(&frame);
+        let peek = peek_waif_header(&encoded).unwrap();
+        assert_eq!(peek.interval_index, 42);
+        assert_eq!(peek.frame_number, 7);
+        assert!(!peek.is_final);
+        assert_eq!(peek.total_frames, 0);
+    }
+
+    #[test]
+    fn peek_waif_header_final_frame() {
+        let frame = crate::AudioFrame {
+            interval_index: 10,
+            stream_id: 0,
+            frame_number: 49,
+            channels: 1,
+            opus_data: vec![0xAB],
+            is_final: true,
+            sample_rate: 48000,
+            total_frames: 50,
+            bpm: 120.0,
+            quantum: 4.0,
+            bars: 4,
+        };
+        let encoded = AudioFrameWire::encode(&frame);
+        let peek = peek_waif_header(&encoded).unwrap();
+        assert_eq!(peek.interval_index, 10);
+        assert_eq!(peek.frame_number, 49);
+        assert!(peek.is_final);
+        assert_eq!(peek.total_frames, 50);
+    }
+
+    #[test]
+    fn peek_waif_header_too_short() {
+        assert!(peek_waif_header(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    fn peek_waif_header_wrong_magic() {
+        let mut data = vec![0u8; 25];
+        data[0..4].copy_from_slice(b"NOPE");
+        assert!(peek_waif_header(&data).is_none());
     }
 }
