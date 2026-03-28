@@ -201,8 +201,9 @@ fn bundle_plugin(args: &[String]) -> Result<()> {
             run_cmd(cmd).with_context(|| format!("cargo build {pkg} failed"))?;
         }
 
-        let out = root.join("target").join(profile);
-        let bundled = root.join("target/bundled");
+        let target = target_dir();
+        let out = target.join(profile);
+        let bundled = target.join("bundled");
         fs::create_dir_all(&bundled)
             .with_context(|| format!("create bundled dir: {}", bundled.display()))?;
 
@@ -344,7 +345,6 @@ fn install_plugin(args: &[String]) -> Result<()> {
         build_plugin(&build_args)?;
     }
 
-    let root = workspace_dir();
     let (clap_dir, vst3_dir) = plugin_dirs()?;
     fs::create_dir_all(&clap_dir)
         .with_context(|| format!("Could not create {}", clap_dir.display()))?;
@@ -352,8 +352,9 @@ fn install_plugin(args: &[String]) -> Result<()> {
         .with_context(|| format!("Could not create {}", vst3_dir.display()))?;
 
     for plugin in &["wail-plugin-send", "wail-plugin-recv"] {
-        let clap_bundle = root.join(format!("target/bundled/{plugin}.clap"));
-        let vst3_bundle = root.join(format!("target/bundled/{plugin}.vst3"));
+        let bundled = target_dir().join("bundled");
+        let clap_bundle = bundled.join(format!("{plugin}.clap"));
+        let vst3_bundle = bundled.join(format!("{plugin}.vst3"));
 
         for path in [&clap_bundle, &vst3_bundle] {
             if !path.exists() {
@@ -391,7 +392,8 @@ fn package_plugin(args: &[String]) -> Result<()> {
         let root = workspace_dir();
         let version = cargo_version(&root)?;
 
-        let payload = root.join("target/pkg_payload");
+        let target = target_dir();
+        let payload = target.join("pkg_payload");
         let clap_dest = payload.join("Library/Audio/Plug-Ins/CLAP");
         let vst3_dest = payload.join("Library/Audio/Plug-Ins/VST3");
         if payload.exists() {
@@ -401,8 +403,9 @@ fn package_plugin(args: &[String]) -> Result<()> {
         fs::create_dir_all(&vst3_dest)?;
 
         for plugin in &["wail-plugin-send", "wail-plugin-recv"] {
-            let clap_src = root.join(format!("target/bundled/{plugin}.clap"));
-            let vst3_src = root.join(format!("target/bundled/{plugin}.vst3"));
+            let bundled = target.join("bundled");
+            let clap_src = bundled.join(format!("{plugin}.clap"));
+            let vst3_src = bundled.join(format!("{plugin}.vst3"));
             for path in [&clap_src, &vst3_src] {
                 if !path.exists() {
                     bail!(
@@ -415,7 +418,7 @@ fn package_plugin(args: &[String]) -> Result<()> {
             copy_bundle(&vst3_src, &vst3_dest)?;
         }
 
-        let pkg_path = root.join(format!("target/wail-plugin-{version}-macos.pkg"));
+        let pkg_path = target.join(format!("wail-plugin-{version}-macos.pkg"));
         let mut pkgbuild = Command::new("pkgbuild");
         pkgbuild
             .arg("--identifier")
@@ -467,7 +470,7 @@ fn build_tauri() -> Result<()> {
     // On Windows the real opus.dll should already be in the build environment;
     // on other platforms an empty placeholder prevents Tauri from erroring on
     // the missing resource mapping entry in tauri.conf.json.
-    let opus_placeholder = workspace_dir().join("target/bundled/opus.dll");
+    let opus_placeholder = target_dir().join("bundled/opus.dll");
     if !opus_placeholder.exists() {
         fs::write(&opus_placeholder, b"")?;
     }
@@ -486,8 +489,9 @@ fn build_tauri() -> Result<()> {
 /// All arguments after `--` are forwarded to `cargo test`.
 fn run_test(args: &[String]) -> Result<()> {
     let root = workspace_dir();
-    let recv_bundle = root.join("target/bundled/wail-plugin-recv.clap");
-    let send_bundle = root.join("target/bundled/wail-plugin-send.clap");
+    let target = target_dir();
+    let recv_bundle = target.join("bundled/wail-plugin-recv.clap");
+    let send_bundle = target.join("bundled/wail-plugin-send.clap");
 
     let bundle_valid = |p: &Path| {
         #[cfg(target_os = "macos")]
@@ -510,12 +514,29 @@ fn run_test(args: &[String]) -> Result<()> {
         args
     };
 
+    // Run non-plugin tests first (parallel is fine).
     println!("\nRunning cargo test...");
     let mut cmd = Command::new(env!("CARGO"));
     cmd.arg("test");
     cmd.args(forward_args);
+    // Exclude wail-plugin-test — those need --test-threads=1 (see below).
+    if forward_args.is_empty() {
+        cmd.args(["--workspace", "--exclude", "wail-plugin-test"]);
+    }
     cmd.current_dir(&root);
-    run_cmd(cmd)
+    run_cmd(cmd)?;
+
+    // Plugin e2e tests mutate process-global state (WAIL_IPC_ADDR env var)
+    // and leak plugin instances — they must run sequentially.
+    if forward_args.is_empty() {
+        println!("\nRunning plugin tests (sequential)...");
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.args(["test", "-p", "wail-plugin-test", "--", "--test-threads=1"]);
+        cmd.current_dir(&root);
+        run_cmd(cmd)?;
+    }
+
+    Ok(())
 }
 
 fn run_turn(args: &[String]) -> Result<()> {
@@ -735,6 +756,16 @@ fn workspace_dir() -> PathBuf {
         .expect("failed to run cargo locate-project");
     let path = String::from_utf8(output.stdout).expect("non-utf8 path");
     Path::new(path.trim()).parent().unwrap().to_owned()
+}
+
+/// Return the effective Cargo target directory.
+///
+/// Respects `CARGO_TARGET_DIR` (set by Conductor workspaces / git worktrees)
+/// and falls back to `<workspace>/target`.
+fn target_dir() -> PathBuf {
+    env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workspace_dir().join("target"))
 }
 
 fn run_cmd(mut cmd: Command) -> Result<()> {

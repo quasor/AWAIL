@@ -87,6 +87,9 @@ impl ClockSync {
     /// Compute the median of a slice of RTT samples.
     /// Used internally by `handle_pong`.
     pub(crate) fn median_of(samples: &[i64]) -> i64 {
+        if samples.is_empty() {
+            return 0;
+        }
         let mut sorted: Vec<i64> = samples.to_vec();
         sorted.sort();
         sorted[sorted.len() / 2]
