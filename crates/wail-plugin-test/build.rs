@@ -19,8 +19,13 @@ fn main() {
         .unwrap() // crates/ -> workspace root
         .to_path_buf();
 
-    let recv_bundle = workspace_root.join("target/bundled/wail-plugin-recv.clap");
-    let send_bundle = workspace_root.join("target/bundled/wail-plugin-send.clap");
+    // Respect CARGO_TARGET_DIR (set by Conductor workspaces / git worktrees)
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workspace_root.join("target"));
+
+    let recv_bundle = target_dir.join("bundled/wail-plugin-recv.clap");
+    let send_bundle = target_dir.join("bundled/wail-plugin-send.clap");
 
     if !bundle_is_valid(&recv_bundle) || !bundle_is_valid(&send_bundle) {
         // NOTE: We cannot spawn `cargo xtask bundle-plugin` here because the

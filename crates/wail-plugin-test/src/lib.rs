@@ -143,11 +143,17 @@ impl ClapTestHost {
 
 /// Find the path to a built `.clap` bundle in `target/bundled/`.
 pub fn find_plugin_bundle(plugin_name: &str) -> PathBuf {
-    // Walk up from this crate's manifest dir to find workspace root
-    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    dir.pop(); // crates/
-    dir.pop(); // workspace root
-    dir.join(format!("target/bundled/{plugin_name}.clap"))
+    // Respect CARGO_TARGET_DIR (set by Conductor workspaces / git worktrees),
+    // falling back to <workspace_root>/target.
+    let target_dir = std::env::var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            dir.pop(); // crates/
+            dir.pop(); // workspace root
+            dir.join("target")
+        });
+    target_dir.join(format!("bundled/{plugin_name}.clap"))
 }
 
 /// Generate a sine wave test signal (interleaved stereo).

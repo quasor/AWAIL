@@ -47,6 +47,10 @@ impl TempoChangeDetector {
     /// `now` is passed explicitly for deterministic testing.
     /// Returns `Some(bpm)` if the change exceeds the threshold and the echo guard is not active.
     pub(crate) fn check(&mut self, bpm: f64, now: Instant) -> Option<f64> {
+        if !bpm.is_finite() || bpm <= 0.0 {
+            return None;
+        }
+
         if let Some(until) = self.echo_guard_until {
             if now < until {
                 return None;
@@ -67,7 +71,9 @@ impl TempoChangeDetector {
     }
 
     pub(crate) fn set_last_tempo(&mut self, bpm: f64) {
-        self.last_tempo = bpm;
+        if bpm.is_finite() && bpm > 0.0 {
+            self.last_tempo = bpm;
+        }
     }
 }
 
