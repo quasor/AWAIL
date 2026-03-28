@@ -126,6 +126,10 @@ pub fn analyze_interval(
     interval_index: i64,
     expected_notes: &[Option<f32>],
 ) -> IntervalAnalysis {
+    // Defensive clamping for wire-format values.
+    let channels = channels.max(1);
+    let sample_rate = sample_rate.max(1);
+
     let bar_duration_secs = 60.0 / bpm * quantum;
     let samples_per_bar_mono = (bar_duration_secs * sample_rate as f64) as usize;
     let samples_per_bar_interleaved = samples_per_bar_mono * channels as usize;

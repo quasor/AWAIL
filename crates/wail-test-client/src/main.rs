@@ -506,8 +506,11 @@ async fn main() -> Result<()> {
                     frame_in_interval = 0;
                     prev_bar = None;
 
-                    // Increment chaos interval counter.
-                    if !chaos_actions.is_empty() {
+                    // Increment chaos interval counter only during Stable actions.
+                    if !chaos_actions.is_empty()
+                        && chaos_idx < chaos_actions.len()
+                        && matches!(chaos_actions[chaos_idx], chaos::ChaosAction::Stable(_))
+                    {
                         chaos_intervals_counted += 1;
                     }
 
