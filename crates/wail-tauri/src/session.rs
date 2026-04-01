@@ -1207,19 +1207,6 @@ async fn session_loop(
                             }
                         }
                     }
-                    // Emit debug frame event for visualization
-                    let offset_ms = last_boundary_time.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
-                    let peer_name = peers.get(&from).and_then(|p| p.display_name.clone());
-                    let _ = app.emit("debug:interval-frame", DebugIntervalFrame {
-                        peer_id: from.clone(),
-                        display_name: peer_name,
-                        interval_index: header.interval_index,
-                        frame_number: header.frame_number,
-                        total_frames: if header.is_final { Some(header.total_frames) } else { None },
-                        is_final: header.is_final,
-                        arrival_offset_ms: offset_ms,
-                        is_local: false,
-                    });
                 }
                 audio_intervals_received += 1;
                 audio_bytes_recv += data.len() as u64;
@@ -1264,6 +1251,23 @@ async fn session_loop(
                         }
                     }
                     wail_audio::rewrite_waif_interval_index(&mut data, local_idx);
+                }
+
+                // Emit debug frame event AFTER interval index rewrite so remote
+                // frames use the local interval index (matching the viz rows).
+                if let Some(header) = wail_audio::peek_waif_header(&data) {
+                    let offset_ms = last_boundary_time.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+                    let peer_name = peers.get(&from).and_then(|p| p.display_name.clone());
+                    let _ = app.emit("debug:interval-frame", DebugIntervalFrame {
+                        peer_id: from.clone(),
+                        display_name: peer_name,
+                        interval_index: header.interval_index,
+                        frame_number: header.frame_number,
+                        total_frames: if header.is_final { Some(header.total_frames) } else { None },
+                        is_final: header.is_final,
+                        arrival_offset_ms: offset_ms,
+                        is_local: false,
+                    });
                 }
 
                 if !ipc_pool.is_empty() {

@@ -1216,7 +1216,7 @@ function debugRender() {
       ctx.font = '9px ' + font;
       ctx.textAlign = 'right';
       const pct = iv.total ? Math.round((iv.frames.size / iv.total) * 100) : null;
-      ctx.fillStyle = pct === null ? '#8b8b9e' : pct >= 95 ? '#34d399' : pct >= 80 ? '#fbbf24' : '#f87171';
+      ctx.fillStyle = isActive ? '#8b8b9e' : pct === null ? '#8b8b9e' : pct >= 95 ? '#34d399' : pct >= 80 ? '#fbbf24' : '#f87171';
       ctx.fillText(`${iv.frames.size}/${total}`, cellX + cw - 4, cellY + 11);
 
       // Frame pixel grid
@@ -1251,11 +1251,11 @@ function debugRender() {
         if (fn === playheadFrame) {
           ctx.fillStyle = '#ffffff'; // bright white playhead
         } else if (iv.frames.has(fn)) {
-          ctx.fillStyle = '#34d399';
-        } else if (iv.total !== null) {
-          ctx.fillStyle = '#f87171';
+          ctx.fillStyle = '#34d399'; // green — received
+        } else if (!isActive && iv.total !== null) {
+          ctx.fillStyle = '#f87171'; // red — dropped (only in completed intervals)
         } else {
-          ctx.fillStyle = '#2a2a30';
+          ctx.fillStyle = '#2a2a30'; // dark — not yet received
         }
         ctx.fillRect(px, py, DEBUG_PIX, DEBUG_PIX);
       }
