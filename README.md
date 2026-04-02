@@ -21,7 +21,7 @@ This builds the WAIL binary and DAW plugins from source. After installation, run
 wail-install-plugins
 ```
 
-Then rescan plugins in your DAW. Note: the Homebrew install provides the `wail` command-line binary. For the full macOS `.app` bundle (dock icon, menu bar), use the DMG installer above.
+Then rescan plugins in your DAW.
 
 **Windows** — Install via Chocolatey: `choco install wail --source <release-url>`. Use `--params "'/VST3Dir:path /CLAPDir:path'"` for custom plugin directories (defaults to `%CommonProgramFiles%\VST3` and `%CommonProgramFiles%\CLAP`). Uninstalling via `choco uninstall wail` also removes the plugins.
 
