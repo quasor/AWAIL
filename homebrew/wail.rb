@@ -89,10 +89,6 @@ class Wail < Formula
         ~/Library/Audio/Plug-Ins/VST3/
 
       Rescan plugins in your DAW to pick them up.
-
-      Note: `wail` launches the app binary directly. For the polished macOS .app
-      bundle (dock icon, native menu bar), download the DMG from:
-        https://github.com/MostDistant/WAIL/releases
     EOS
   end
 
