@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -24,6 +25,7 @@ type App struct {
 	dataDir      string
 	fileLog      *RotatingFileWriter
 	wsLog        *WsLogWriter
+	pluginErrors []string
 }
 
 // NewApp creates a new App instance. Pass instance=0 for the default instance.
@@ -36,11 +38,21 @@ func NewApp(instance int) *App {
 	identity := getOrCreateIdentity(dataDir)
 	streamNames := LoadStreamNames(dataDir)
 
+	// Auto-install plugins (skip on Windows — handled by NSIS installer)
+	var pluginErrors []string
+	if runtime.GOOS != "windows" {
+		pluginDir := FindPluginDir("")
+		if pluginDir != "" {
+			pluginErrors = InstallPluginsIfMissing(pluginDir)
+		}
+	}
+
 	return &App{
-		ipcPort:     uint16(9191 + instance),
-		streamNames: streamNames,
-		dataDir:     dataDir,
-		identity:    identity,
+		ipcPort:      uint16(9191 + instance),
+		streamNames:  streamNames,
+		dataDir:      dataDir,
+		identity:     identity,
+		pluginErrors: pluginErrors,
 	}
 }
 
@@ -260,10 +272,11 @@ func (a *App) SetLogSharing(enabled bool) error {
 	return nil
 }
 
-// GetPluginInstallErrors returns any plugin installation errors.
+// GetPluginInstallErrors returns any plugin installation errors from startup.
 func (a *App) GetPluginInstallErrors() []string {
-	// TODO: Phase 6 — wire up plugin_install.go
-	return nil
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.pluginErrors
 }
 
 // RenameStream updates a stream name.
