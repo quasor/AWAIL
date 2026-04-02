@@ -194,12 +194,12 @@ Releases are fully automated — no manual `knope` commands needed:
 
 1. **Push to `main`** → `auto-release.yml` runs `knope prepare-release`, which consumes conventional commits (and `.changeset/` files if present as a fallback), bumps versions, updates `CHANGELOG.md`, and opens/updates a PR from the `release` branch → `main`.
 2. **Merge the release PR** → `release-on-merge.yml` runs `knope release` (creates GitHub release + git tag) and dispatches artifact builds.
-3. **`release.yml`** builds platform artifacts (macOS, Windows, Linux — plugins + Tauri app installers) and uploads them to the GitHub release.
+3. **`release.yml`** builds platform artifacts (macOS, Windows, Linux — plugins + zip archives + Homebrew source tarball) and uploads them to the GitHub release.
 
 ### Rules for agents
 
 - **Use conventional commits for user-facing work** (`feat:`, `fix:`, `feat!:`). Do NOT also create a changeset file — knope processes both sources and this creates duplicate changelog entries.
-- **Never manually edit version numbers** in `Cargo.toml` or `tauri.conf.json` — knope handles this.
+- **Never manually edit version numbers** in `Cargo.toml` — knope handles this.
 - **Never manually create git tags** for releases — GitHub Actions handles tagging.
 - **Never run `knope release` or `knope prepare-release` locally** — GitHub Actions runs both automatically.
 - **Use the correct conventional commit prefix.** New features MUST use `feat:`, bug fixes MUST use `fix:`, breaking changes MUST use `feat!:` or `fix!:`. Never use `fix:` for a new feature — this causes knope to bump only the patch version instead of minor. Similarly, never use unprefixed or `chore:` commits for user-facing changes — knope ignores them entirely. Get the prefix right; it directly controls the version bump.

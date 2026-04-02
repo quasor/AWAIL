@@ -66,6 +66,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wail-app/go.mod
+
       - name: Cache vcpkg
         id: vcpkg-cache
         uses: actions/cache@v5
@@ -124,6 +128,10 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.9
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wail-app/go.mod
 
       - name: Install system dependencies
         run: |
