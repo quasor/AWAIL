@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.26.1 (2026-04-02)
+
+### Fixes
+
+- Evaluate Go/Wails app layer (wail-app/) (#283)
+
 ## 1.26.0 (2026-04-02)
 
 ### Features
