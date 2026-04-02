@@ -47,6 +47,10 @@ func (lb *LinkBridge) Disable() {
 
 func (lb *LinkBridge) SetTempo(bpm float64) {
 	lb.mu.Lock()
+	// Snapshot current beat before changing BPM to avoid retroactive recalculation
+	elapsed := time.Since(lb.startTime).Seconds()
+	lb.beat += elapsed * lb.bpm / 60.0
+	lb.startTime = time.Now()
 	lb.bpm = bpm
 	lb.mu.Unlock()
 	lb.detector.SetLastTempo(bpm)
@@ -61,6 +65,7 @@ func (lb *LinkBridge) ForceBeat(beat float64, rttUs *int64) {
 		compensation = float64(*rttUs) / 2_000_000.0 * lb.bpm / 60.0
 	}
 	lb.beat = beat + compensation
+	lb.startTime = time.Now()
 	lb.detector.ArmEchoGuard(time.Now().Add(echoGuardDuration))
 	log.Printf("[link-stub] Forced beat to %.2f (compensated=%.2f)", beat, lb.beat)
 }

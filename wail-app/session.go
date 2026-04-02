@@ -171,6 +171,7 @@ func sessionLoop(
 	// IPC
 	ipcFromPluginCh := make(chan ipcFrame, 64)
 	ipcDisconnectCh := make(chan int, 16)
+	ipcSendRegCh := make(chan ipcSendRegistration, 16) // send stream registrations from IPC goroutine
 	var nextConnID int
 
 	// Recording
@@ -198,7 +199,7 @@ func sessionLoop(
 	logInfo("IPC listening on %s", listener.Addr())
 
 	// Accept IPC connections in goroutine
-	go acceptIPCConnections(ctx, listener, ipcFromPluginCh, ipcDisconnectCh, ipcPool, localSendStreams, &nextConnID, &ipcDropCount, emitter, logInfo, logWarn)
+	go acceptIPCConnections(ctx, listener, ipcFromPluginCh, ipcDisconnectCh, ipcSendRegCh, ipcPool, &nextConnID, &ipcDropCount, emitter, logInfo, logWarn)
 
 	// Timers
 	pingTicker := time.NewTicker(time.Duration(PingIntervalMs) * time.Millisecond)
@@ -611,6 +612,10 @@ func sessionLoop(
 				logInfo("audio: first WAIF frame sent (%d bytes, interval=%v)", len(wireData), lastIntervalIndex)
 			}
 
+		// --- IPC send stream registration ---
+		case reg := <-ipcSendRegCh:
+			localSendStreams[reg.ConnID] = reg.StreamIndex
+
 		// --- IPC disconnect ---
 		case connID := <-ipcDisconnectCh:
 			ipcPool.Remove(connID)
@@ -814,6 +819,11 @@ type ipcFrame struct {
 	data   []byte
 }
 
+type ipcSendRegistration struct {
+	ConnID      int
+	StreamIndex uint16
+}
+
 func connectMesh(ctx context.Context, config SessionConfig, peerID string) (*PeerMesh, <-chan FromPeerSync, <-chan FromPeerAudio, error) {
 	client, channels, peerNames, err := ConnectSignaling(
 		ctx, config.Server, config.Room, peerID,
@@ -831,8 +841,8 @@ func acceptIPCConnections(
 	listener net.Listener,
 	fromPluginCh chan<- ipcFrame,
 	disconnectCh chan<- int,
+	sendRegCh chan<- ipcSendRegistration,
 	pool *IPCWriterPool,
-	sendStreams map[int]uint16,
 	nextID *int,
 	dropCounter *atomic.Uint64,
 	emitter EventEmitter,
@@ -888,9 +898,7 @@ func acceptIPCConnections(
 				pool.Add(connID, conn)
 				logInfo("Plugin (conn %d) identified as recv", connID)
 			} else {
-				mu.Lock()
-				sendStreams[connID] = streamIndex
-				mu.Unlock()
+				sendRegCh <- ipcSendRegistration{ConnID: connID, StreamIndex: streamIndex}
 				logInfo("Plugin (conn %d) identified as send, stream_index=%d", connID, streamIndex)
 			}
 			emitter.Emit("plugin:connected", nil)
