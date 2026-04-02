@@ -616,8 +616,14 @@ impl IntervalRing {
         let mut keep = Vec::new();
         let pending_count = pending.len();
         let mut mixed_count = 0usize;
+        let mut evicted_count = 0usize;
         for mut remote in pending.drain(..) {
             if remote.index != completed_index && Some(remote.index) != prev_playback {
+                // Auto-evict stale entries older than 2 intervals behind current
+                if remote.index < completed_index - 2 {
+                    evicted_count += 1;
+                    continue;
+                }
                 keep.push(remote);
                 continue;
             }
@@ -723,6 +729,7 @@ impl IntervalRing {
             completed_index = completed_index,
             pending_count = pending_count,
             mixed_count = mixed_count,
+            evicted_stale = evicted_count,
             kept_for_future = kept_count,
             playback_len = self.playback_len,
             peers = ?active_peers,
@@ -2341,6 +2348,53 @@ mod tests {
         assert!(
             played_after_restart > 0,
             "Should have full playback after transport restart"
+        );
+    }
+
+    // --- Test: Stale pending remote eviction (#269) ---
+
+    #[test]
+    fn stale_pending_remote_evicted_on_swap() {
+        let mut ring = make_ring();
+        let input = vec![0.1f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // Advance through several intervals to establish a high completed_index
+        // Interval 0: beats 0..16
+        ring.process(&input, &mut output, 0.0);
+        ring.process(&input, &mut output, 8.0);
+        // Interval 1: beats 16..32
+        ring.process(&input, &mut output, 16.0);
+        ring.process(&input, &mut output, 24.0);
+        // Interval 2: beats 32..48
+        ring.process(&input, &mut output, 32.0);
+        ring.process(&input, &mut output, 40.0);
+        // Interval 3: beats 48..64
+        ring.process(&input, &mut output, 48.0);
+        ring.process(&input, &mut output, 56.0);
+        // Interval 4: beats 64..80
+        ring.process(&input, &mut output, 64.0);
+
+        // Now current interval is 4, completed_index at next swap will be 4.
+        // Feed remote intervals for very old indices (simulating stale data)
+        let stale_samples = vec![0.5f32; 256];
+        ring.feed_remote("stale-peer".into(), 0, 0, stale_samples.clone()); // index 0 — very stale
+        ring.feed_remote("stale-peer".into(), 0, 1, stale_samples.clone()); // index 1 — stale
+
+        // Also feed a future interval that should be kept
+        ring.feed_remote("future-peer".into(), 0, 5, stale_samples.clone()); // index 5 — future
+
+        assert_eq!(ring.pending_remote_count(), 3);
+
+        // Cross into interval 5 — triggers swap with completed_index = 4
+        ring.process(&input, &mut output, 80.0);
+
+        // Stale entries (index 0 and 1) should be evicted (both < 4 - 2 = 2)
+        // Future entry (index 5) should be kept (or mixed if it matches)
+        assert!(
+            ring.pending_remote_count() <= 1,
+            "Stale pending remote entries should be evicted, got {}",
+            ring.pending_remote_count()
         );
     }
 

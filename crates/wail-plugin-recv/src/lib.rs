@@ -45,7 +45,7 @@ const DEFAULT_QUANTUM: f64 = 4.0;
 /// - Communication: crossbeam channel from IPC thread to audio thread
 pub struct WailRecvPlugin {
     params: Arc<WailRecvParams>,
-    bridge: Arc<Mutex<Option<AudioBridge>>>,
+    bridge: Option<AudioBridge>,
     sample_rate: f32,
     ipc_incoming_rx: Option<Receiver<(String, u16, i64, Vec<f32>)>>,
     /// Peer lifecycle events from IPC thread (for slot affinity)
@@ -79,7 +79,7 @@ impl Default for WailRecvPlugin {
     fn default() -> Self {
         Self {
             params: Arc::new(WailRecvParams::default()),
-            bridge: Arc::new(Mutex::new(None)),
+            bridge: None,
             sample_rate: 48000.0,
             ipc_incoming_rx: None,
             peer_event_rx: None,
@@ -243,13 +243,7 @@ impl Plugin for WailRecvPlugin {
             *buf = vec![0.0f32; max_buf];
         }
 
-        match self.bridge.lock() {
-            Ok(mut guard) => *guard = Some(bridge),
-            Err(_) => {
-                nih_error!("WAIL Recv: bridge mutex poisoned, initialization failed");
-                return false;
-            }
-        }
+        self.bridge = Some(bridge);
 
         // Signal the old IPC thread to shut down before spawning a new one
         if let Some(ref flag) = self.ipc_shutdown {
@@ -302,10 +296,8 @@ impl Plugin for WailRecvPlugin {
             for name in &mut self.applied_slot_names {
                 *name = None;
             }
-            if let Ok(mut bridge) = self.bridge.lock() {
-                if let Some(ref mut b) = *bridge {
-                    b.reset();
-                }
+            if let Some(ref mut b) = self.bridge {
+                b.reset();
             }
         });
     }
@@ -330,10 +322,8 @@ impl Plugin for WailRecvPlugin {
         if transport_restarted {
             permit_alloc(|| {
                 self.cumulative_samples = 0;
-                if let Ok(mut bridge) = self.bridge.lock() {
-                    if let Some(ref mut b) = *bridge {
-                        b.reset_transport();
-                    }
+                if let Some(ref mut b) = self.bridge {
+                    b.reset_transport();
                 }
             });
         }
@@ -362,8 +352,7 @@ impl Plugin for WailRecvPlugin {
             );
         }
 
-        if let Ok(mut bridge_guard) = self.bridge.try_lock() {
-            if let Some(ref mut bridge) = *bridge_guard {
+        if let Some(ref mut bridge) = self.bridge {
                 bridge.update_config(
                     DEFAULT_BARS,
                     DEFAULT_QUANTUM,
@@ -511,7 +500,6 @@ impl Plugin for WailRecvPlugin {
                         }
                     }
                 });
-            }
         }
 
         ProcessStatus::KeepAlive

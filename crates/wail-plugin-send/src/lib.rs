@@ -1,6 +1,6 @@
 use std::io::Write as _;
 use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use assert_no_alloc::permit_alloc;
@@ -50,7 +50,7 @@ struct RawFrame {
 /// - Communication: crossbeam channel from audio thread to IPC thread
 pub struct WailSendPlugin {
     params: Arc<WailSendParams>,
-    bridge: Arc<Mutex<Option<AudioBridge>>>,
+    bridge: Option<AudioBridge>,
     sample_rate: f32,
     /// Channel for streaming 20ms frames to the IPC thread
     frame_tx: Option<Sender<RawFrame>>,
@@ -81,7 +81,7 @@ impl Default for WailSendPlugin {
     fn default() -> Self {
         Self {
             params: Arc::new(WailSendParams::default()),
-            bridge: Arc::new(Mutex::new(None)),
+            bridge: None,
             sample_rate: 48000.0,
             frame_tx: None,
             interleave_buf: Vec::new(),
@@ -228,13 +228,7 @@ impl Plugin for WailSendPlugin {
         self.interleave_buf = vec![0.0f32; max_buf];
         self.playback_buf = vec![0.0f32; max_buf];
 
-        match self.bridge.lock() {
-            Ok(mut guard) => *guard = Some(bridge),
-            Err(_) => {
-                nih_error!("WAIL Send: bridge mutex poisoned, initialization failed");
-                return false;
-            }
-        }
+        self.bridge = Some(bridge);
 
         let (ftx, frx) = crossbeam_channel::bounded::<RawFrame>(512);
         self.frame_tx = Some(ftx);
@@ -282,10 +276,8 @@ impl Plugin for WailSendPlugin {
             self.streaming_interval_index = None;
             self.streaming_frame_number = 0;
             self.was_playing = None;
-            if let Ok(mut bridge) = self.bridge.lock() {
-                if let Some(ref mut b) = *bridge {
-                    b.reset();
-                }
+            if let Some(ref mut b) = self.bridge {
+                b.reset();
             }
         });
     }
@@ -313,10 +305,8 @@ impl Plugin for WailSendPlugin {
                 self.streaming_interval_index = None;
                 self.streaming_frame_number = 0;
                 self.frame_buffer.clear();
-                if let Ok(mut bridge) = self.bridge.lock() {
-                    if let Some(ref mut b) = *bridge {
-                        b.reset_transport();
-                    }
+                if let Some(ref mut b) = self.bridge {
+                    b.reset_transport();
                 }
             });
         }
@@ -333,8 +323,7 @@ impl Plugin for WailSendPlugin {
         };
         self.cumulative_samples += num_samples as u64;
 
-        if let Ok(mut bridge_guard) = self.bridge.try_lock() {
-            if let Some(ref mut bridge) = *bridge_guard {
+        if let Some(ref mut bridge) = self.bridge {
                 bridge.update_config(
                     DEFAULT_BARS,
                     DEFAULT_QUANTUM,
@@ -437,7 +426,6 @@ impl Plugin for WailSendPlugin {
                     }
                 });
 
-            }
         }
 
         if !self.params.passthrough.value() {
