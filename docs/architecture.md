@@ -309,6 +309,8 @@ A **session** starts when the 2nd peer joins a room (≥2 peers) and ends when t
 1. **Joining** — from session start until all peers report `dc_open` and `plugin_connected`. Captures connection establishment and plugin attachment.
 2. **Playing** — steady-state audio flow after all peers are fully connected.
 
+> **Note:** Several field names retain their WebRTC-era naming: `dc_open` is always `true` once the WebSocket connects (so the joining→playing transition effectively depends only on `plugin_connected`), and `dc_drops` is always reported as 0 (WebSocket backpressure drops are not currently tracked per-peer). Both fields are retained in the protocol for backward compatibility.
+
 ### Per-direction metrics
 
 For each unique direction (e.g., `peer1→peer2`), the server tracks metrics independently per phase (joining vs playing). This distinguishes setup-related issues from steady-state network quality.
