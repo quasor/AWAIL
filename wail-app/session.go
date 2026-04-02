@@ -163,6 +163,11 @@ func sessionLoop(
 	localSendActive := make(map[uint16]bool)
 	loggedFirstFrameSent := false
 
+	// Test tone state
+	var testToneBoundaryCh chan IntervalBoundaryInfo
+	var testToneCancelFn context.CancelFunc
+	var testToneStream *uint16
+
 	// IPC
 	ipcFromPluginCh := make(chan ipcFrame, 64)
 	ipcDisconnectCh := make(chan int, 16)
@@ -254,6 +259,41 @@ func sessionLoop(
 				emitter.Emit("chat:message", ChatMessageEvent{SenderName: displayName, IsOwn: true, Text: cmd.Text})
 			case "StreamNamesChanged":
 				localStreamNames = cmd.Names
+				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
+			case "SetTestTone":
+				// Stop existing test tone
+				if testToneCancelFn != nil {
+					testToneCancelFn()
+					testToneCancelFn = nil
+				}
+				testToneBoundaryCh = nil
+				if testToneStream != nil {
+					delete(localStreamNames, *testToneStream)
+				}
+				testToneStream = nil
+
+				if cmd.StreamIndex != nil {
+					si := *cmd.StreamIndex
+					toneCtx, cancelFn := context.WithCancel(ctx)
+					testToneCancelFn = cancelFn
+					boundaryCh := make(chan IntervalBoundaryInfo, 4)
+					testToneBoundaryCh = boundaryCh
+					testToneStream = &si
+
+					connID := int(^uint(0)>>1) - int(si)
+					localSendStreams[connID] = si
+
+					toneName := "Test Tone"
+					if displayName != "" {
+						toneName = displayName + "'s Test Tone"
+					}
+					localStreamNames[si] = toneName
+
+					go TestToneTask(toneCtx, si, connID, ipcFromPluginCh, boundaryCh)
+					logInfo("[TEST] Test tone started on Send %d", si)
+				} else {
+					logInfo("[TEST] Test tone stopped")
+				}
 				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
 			case "Disconnect":
 				logInfo("Disconnecting...")
@@ -586,11 +626,11 @@ func sessionLoop(
 					mesh.Broadcast(NewTempoChange(ev.BPM, quantum, ev.TimestampUs))
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime)
+				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh)
 
 			case "StateUpdate":
 				mesh.Broadcast(NewStateSnapshot(ev.BPM, ev.Beat, ev.Phase, ev.Quantum, ev.TimestampUs))
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime)
+				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh)
 			}
 
 		// --- Ping timer ---
@@ -891,6 +931,7 @@ func handleIntervalBoundary(
 	framesSent, framesRecv, bytesSent, bytesRecv *uint64,
 	totalSent, totalRecv *uint64,
 	lastIntervalIndex **int64, lastBoundaryTime **time.Time,
+	testToneBoundaryCh chan IntervalBoundaryInfo,
 ) {
 	idx := computeIntervalIndex(beat, bars, quantum)
 	if lastIdx != nil && idx <= *lastIdx {
@@ -919,6 +960,13 @@ func handleIntervalBoundary(
 	*lastBoundaryTime = &now
 
 	mesh.Broadcast(NewIntervalBoundary(idx))
+
+	if testToneBoundaryCh != nil {
+		select {
+		case testToneBoundaryCh <- IntervalBoundaryInfo{Index: idx, BPM: bpm, Bars: bars, Quantum: quantum}:
+		default:
+		}
+	}
 }
 
 func removePeerFully(peers *PeerRegistry, pool *IPCWriterPool, peerID string) {
