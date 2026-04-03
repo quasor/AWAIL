@@ -117,15 +117,21 @@ func InstallPluginsIfMissing(pluginDir string) []string {
 }
 
 // copyPath copies a file or directory recursively.
+// Resolves symlinks on src so that Homebrew-linked plugin bundles
+// (symlinks in /opt/homebrew/lib/ → Cellar) are copied correctly.
 func copyPath(src, dst string) error {
-	info, err := os.Stat(src)
+	resolved, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(resolved)
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
-		return copyDir(src, dst)
+		return copyDir(resolved, dst)
 	}
-	return copyFile(src, dst)
+	return copyFile(resolved, dst)
 }
 
 func copyFile(src, dst string) error {
