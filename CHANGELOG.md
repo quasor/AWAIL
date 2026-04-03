@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1 (2026-04-03)
+
+### Fixes
+
+- add missing Linux CI deps and disable unused opusfile in Go builds (#299)
+- add GTK/WebKit deps for Linux Go build, handle choco flakiness (#301)
+
 ## 2.0.0 (2026-04-03)
 
 ### Breaking Changes
