@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.0 (2026-04-03)
+
+### Breaking Changes
+
+- remove wail-tauri crate, replace with Go/Wails CI builds (#296)
+
+### Fixes
+
+- docker e2e test build and CLI flag mismatches (#297)
+- eliminate last audio-thread allocation in spare_record replenishment (#293)
+- preserve Vec capacity in IntervalRing::take_completed() (#292)
+
 ## 1.26.2 (2026-04-02)
 
 ### Fixes
