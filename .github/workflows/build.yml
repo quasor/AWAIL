@@ -79,6 +79,7 @@ jobs:
 
       - name: Install pkg-config
         run: choco install pkgconfiglite -y
+        continue-on-error: true
 
       - name: Build plugin
         env:
@@ -138,6 +139,9 @@ jobs:
             libgl-dev \
             libx11-xcb-dev \
             libxcb1-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
             cmake \
             g++
 
