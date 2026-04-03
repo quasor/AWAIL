@@ -1,4 +1,4 @@
-# WAIL — WebSocket Audio Interchange for Link
+# WAIL — WAN Audio Interchange for Link
 
 WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN, with intervalic audio (NINJAM-style) captured, Opus-encoded, and transmitted via the server.
 
