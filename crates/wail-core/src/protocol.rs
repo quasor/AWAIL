@@ -157,9 +157,6 @@ pub struct PeerFrameReport {
     /// Jitter (MAD of RTT) in microseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter_us: Option<i64>,
-    /// Cumulative DataChannel backpressure drops (audio receiver channel full).
-    #[serde(default)]
-    pub dc_drops: u64,
     /// Cumulative WAIF frames that arrived for already-passed intervals.
     #[serde(default)]
     pub late_frames: u64,
@@ -267,7 +264,6 @@ mod tests {
         assert_eq!(report.frames_received, 95);
         assert_eq!(report.rtt_us, None);
         assert_eq!(report.jitter_us, None);
-        assert_eq!(report.dc_drops, 0);
         assert_eq!(report.late_frames, 0);
         assert_eq!(report.decode_failures, 0);
     }
@@ -279,7 +275,6 @@ mod tests {
             frames_received: 190,
             rtt_us: Some(15000),
             jitter_us: Some(3000),
-            dc_drops: 5,
             late_frames: 2,
             decode_failures: 1,
         };
@@ -287,7 +282,6 @@ mod tests {
         let decoded: PeerFrameReport = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.rtt_us, Some(15000));
         assert_eq!(decoded.jitter_us, Some(3000));
-        assert_eq!(decoded.dc_drops, 5);
         assert_eq!(decoded.late_frames, 2);
         assert_eq!(decoded.decode_failures, 1);
     }

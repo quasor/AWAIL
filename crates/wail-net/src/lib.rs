@@ -1,8 +1,6 @@
 pub mod signaling;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use tokio::sync::mpsc;
@@ -26,8 +24,6 @@ pub struct PeerMesh {
     stream_count: u16,
     /// Display names for peers already in the room at join time (from signaling server).
     initial_peer_names: HashMap<String, Option<String>>,
-    /// Cumulative count of audio frames dropped due to outgoing channel backpressure.
-    audio_send_drops: Arc<AtomicU64>,
     /// True if another peer from the same public IP (LAN) is already in the room.
     lan_peer_present: bool,
 }
@@ -59,7 +55,6 @@ impl PeerMesh {
             peers: HashSet::new(),
             stream_count,
             initial_peer_names,
-            audio_send_drops: Arc::new(AtomicU64::new(0)),
             lan_peer_present,
         };
 
@@ -80,18 +75,14 @@ impl PeerMesh {
     /// Broadcast binary audio data to all peers in the room.
     /// Returns an empty vec (no per-peer failures with server relay).
     pub async fn broadcast_audio(&self, data: &[u8]) -> Vec<String> {
-        if !self.signaling.send_audio(data) {
-            self.audio_send_drops.fetch_add(1, Ordering::Relaxed);
-        }
+        self.signaling.send_audio(data);
         Vec::new()
     }
 
     /// Send binary audio data to a specific peer.
     /// Note: the server broadcasts to all room peers; targeted audio is not supported.
     pub async fn send_audio_to(&self, _peer_id: &str, data: &[u8]) -> Result<()> {
-        if !self.signaling.send_audio(data) {
-            self.audio_send_drops.fetch_add(1, Ordering::Relaxed);
-        }
+        self.signaling.send_audio(data);
         Ok(())
     }
 
@@ -169,12 +160,6 @@ impl PeerMesh {
         }) {
             tracing::warn!("failed to send metrics report: {e}");
         }
-    }
-
-    /// Get the cumulative audio send drop count (channel backpressure).
-    /// Not per-peer — the server relay means all peers share one outgoing channel.
-    pub fn dc_audio_drops(&self, _peer_id: &str) -> u64 {
-        self.audio_send_drops.load(Ordering::Relaxed)
     }
 
     pub fn connected_peers(&self) -> Vec<String> {
