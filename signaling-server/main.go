@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -33,6 +34,14 @@ const (
 	maxMessageSize = 256 * 1024
 	// Keep at most this many completed sessions per room in memory.
 	maxCompletedSessions = 50
+
+	// Rate limiting (token bucket)
+	baseBinaryRate   = 60.0  // tokens/sec per stream
+	baseBinaryBurst  = 120.0 // max tokens per stream
+	baseTextRate     = 100.0 // tokens/sec (not scaled by streams)
+	baseTextBurst    = 200.0 // max tokens
+	rateLimitWarnMax = 50    // violations before disconnect
+	maxStreamsPerPeer = 16   // cap stream_count for rate-limit scaling
 )
 
 // ---------------------------------------------------------------------------
@@ -88,11 +97,40 @@ type connEntry struct {
 
 // conn wraps a single WebSocket connection that has joined a room.
 type conn struct {
-	ws       *websocket.Conn
-	room     string
-	peerID   string
-	send     chan wsMessage
-	publicIP string // client's public IP for LAN detection
+	ws          *websocket.Conn
+	room        string
+	peerID      string
+	send        chan wsMessage
+	publicIP    string // client's public IP for LAN detection
+	streamCount int    // declared at join time; used to scale rate limits
+}
+
+// tokenBucket implements a simple token bucket rate limiter.
+// Not goroutine-safe — intended for single-goroutine use in readPump.
+type tokenBucket struct {
+	tokens     float64
+	maxTokens  float64
+	refillRate float64 // tokens per second
+	lastRefill time.Time
+}
+
+func newTokenBucket(rate, burst float64) tokenBucket {
+	return tokenBucket{tokens: burst, maxTokens: burst, refillRate: rate, lastRefill: time.Now()}
+}
+
+func (b *tokenBucket) allow() bool {
+	now := time.Now()
+	elapsed := now.Sub(b.lastRefill).Seconds()
+	b.tokens += elapsed * b.refillRate
+	if b.tokens > b.maxTokens {
+		b.tokens = b.maxTokens
+	}
+	b.lastRefill = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -380,16 +418,17 @@ func (h *hub) archiveSession(roomName string, s *session) {
 // Hub methods
 // ---------------------------------------------------------------------------
 
-func (h *hub) join(c *conn, msg clientMsg) (string, string) {
+func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 
 	roomName := msg.Room
 	peerID := msg.PeerID
 	streamCount := msg.StreamCount
 	if streamCount < 1 { streamCount = 1 }
+	if streamCount > maxStreamsPerPeer { streamCount = maxStreamsPerPeer }
 
 	if semverLess(msg.ClientVersion, minVersion) {
 		c.sendJSON(map[string]any{"type": "join_error", "code": "version_outdated", "min_version": minVersion})
-		return "", ""
+		return "", "", 0
 	}
 
 	// DB queries BEFORE any room lock
@@ -401,7 +440,7 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string) {
 	if roomExists && storedHash.Valid && storedHash.String != "" {
 		if hashPassword(msg.Password) != storedHash.String {
 			c.sendJSON(map[string]any{"type": "join_error", "code": "unauthorized"})
-			return "", ""
+			return "", "", 0
 		}
 	}
 
@@ -410,7 +449,7 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string) {
 	h.db.QueryRow("SELECT COALESCE(SUM(stream_count), 0) FROM peers WHERE room = ?", roomName).Scan(&usedSlots)
 	if usedSlots+streamCount > roomCapacity {
 		c.sendJSON(map[string]any{"type": "join_error", "code": "room_full", "slots_available": roomCapacity - usedSlots})
-		return "", ""
+		return "", "", 0
 	}
 
 	if !roomExists {
@@ -457,6 +496,7 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string) {
 	r.connMap[peerID] = c
 	c.room = roomName
 	c.peerID = peerID
+	c.streamCount = streamCount
 	r.rebuildConns()
 
 	peerCountAfter := len(r.connMap)
@@ -491,7 +531,7 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string) {
 		"type": "join_ok", "peers": peers, "peer_display_names": peerDisplayNames,
 		"lan_peer_present": lanPeerPresent,
 	})
-	return roomName, peerID
+	return roomName, peerID, streamCount
 }
 
 func (h *hub) signal(room, peerID string, c *conn, msg clientMsg) {
@@ -692,19 +732,69 @@ func (c *conn) readPump(h *hub) {
 		}
 		return nil
 	})
+
+	// Rate limiting state (single-goroutine, no sync needed).
+	textBucket := newTokenBucket(baseTextRate, baseTextBurst)
+	var binaryBucket *tokenBucket
+	var violations int
+	var warned bool
+
 	for {
 		msgType, raw, err := c.ws.ReadMessage()
 		if err != nil { return }
+
 		if msgType == websocket.BinaryMessage {
+			if binaryBucket != nil && !binaryBucket.allow() {
+				violations++
+				if violations <= 5 || violations%10 == 0 {
+					log.Printf("warn: binary rate limit exceeded for peer %s (%d/%d)", peerID, violations, rateLimitWarnMax)
+				}
+				if !warned && violations >= rateLimitWarnMax/2 {
+					warned = true
+					c.sendJSON(map[string]any{"type": "rate_limit_warning", "message": "sending too fast, connection will be closed"})
+				}
+				if violations >= rateLimitWarnMax {
+					log.Printf("warn: disconnecting peer %s for sustained rate limit abuse (%d violations)", peerID, violations)
+					return
+				}
+				continue
+			}
 			h.broadcastAudioBinary(room, peerID, c, raw)
 			continue
 		}
+
+		if !textBucket.allow() {
+			// Peek at the type field to exempt "join" messages.
+			if !bytes.Contains(raw, []byte(`"type":"join"`)) {
+				violations++
+				if violations <= 5 || violations%10 == 0 {
+					log.Printf("warn: text rate limit exceeded for peer %s (%d/%d)", peerID, violations, rateLimitWarnMax)
+				}
+				if !warned && violations >= rateLimitWarnMax/2 {
+					warned = true
+					c.sendJSON(map[string]any{"type": "rate_limit_warning", "message": "sending too fast, connection will be closed"})
+				}
+				if violations >= rateLimitWarnMax {
+					log.Printf("warn: disconnecting peer %s for sustained rate limit abuse (%d violations)", peerID, violations)
+					return
+				}
+				continue
+			}
+		}
+
 		var msg clientMsg
 		if err := json.Unmarshal(raw, &msg); err != nil { continue }
 		switch msg.Type {
 		case "join":
 			if room != "" { h.leave(room, peerID, c) }
-			room, peerID = h.join(c, msg)
+			var sc int
+			room, peerID, sc = h.join(c, msg)
+			if room != "" {
+				bb := newTokenBucket(baseBinaryRate*float64(sc), baseBinaryBurst*float64(sc))
+				binaryBucket = &bb
+				violations = 0
+				warned = false
+			}
 		case "signal":
 			h.signal(room, peerID, c, msg)
 		case "sync":
