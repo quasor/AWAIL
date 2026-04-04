@@ -25,7 +25,6 @@ type directionMetrics struct {
 	FramesDropped  uint64 `json:"frames_dropped"`
 	RttUs          *int64 `json:"rtt_us,omitempty"`
 	JitterUs       *int64 `json:"jitter_us,omitempty"`
-	DcDrops        uint64 `json:"dc_drops"`
 	LateFrames     uint64 `json:"late_frames"`
 	DecodeFailures uint64 `json:"decode_failures"`
 }
@@ -159,15 +158,15 @@ func fmtMs(us *int64) string {
 
 func printDirections(dirs map[string]*directionMetrics) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "    DIRECTION\tEXPECTED\tRECEIVED\tDROPPED\tDROP %%\tRTT\tJITTER\tDC DROPS\tLATE\tDECODE ERR\n")
+	fmt.Fprintf(w, "    DIRECTION\tEXPECTED\tRECEIVED\tDROPPED\tDROP %%\tRTT\tJITTER\tLATE\tDECODE ERR\n")
 	for dir, m := range dirs {
 		pct := 0.0
 		if m.FramesExpected > 0 {
 			pct = float64(m.FramesDropped) / float64(m.FramesExpected) * 100
 		}
-		fmt.Fprintf(w, "    %s\t%d\t%d\t%d\t%.1f%%\t%s\t%s\t%d\t%d\t%d\n",
+		fmt.Fprintf(w, "    %s\t%d\t%d\t%d\t%.1f%%\t%s\t%s\t%d\t%d\n",
 			dir, m.FramesExpected, m.FramesReceived, m.FramesDropped, pct,
-			fmtMs(m.RttUs), fmtMs(m.JitterUs), m.DcDrops, m.LateFrames, m.DecodeFailures)
+			fmtMs(m.RttUs), fmtMs(m.JitterUs), m.LateFrames, m.DecodeFailures)
 	}
 	w.Flush()
 }

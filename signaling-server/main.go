@@ -70,7 +70,6 @@ type peerFrameReport struct {
 	FramesReceived uint64 `json:"frames_received"`
 	RttUs          *int64 `json:"rtt_us,omitempty"`
 	JitterUs       *int64 `json:"jitter_us,omitempty"`
-	DcDrops        uint64 `json:"dc_drops"`
 	LateFrames     uint64 `json:"late_frames"`
 	DecodeFailures uint64 `json:"decode_failures"`
 }
@@ -113,7 +112,6 @@ type directionMetrics struct {
 	FramesDropped  uint64 `json:"frames_dropped"`
 	RttUs          *int64 `json:"rtt_us,omitempty"`
 	JitterUs       *int64 `json:"jitter_us,omitempty"`
-	DcDrops        uint64 `json:"dc_drops"`
 	LateFrames     uint64 `json:"late_frames"`
 	DecodeFailures uint64 `json:"decode_failures"`
 }
@@ -197,7 +195,6 @@ func (s *session) updateMetrics(reporter string, dcOpen, pluginConnected bool, p
 			}
 			dm.RttUs = report.RttUs
 			dm.JitterUs = report.JitterUs
-			dm.DcDrops = report.DcDrops - snap.DcDrops
 			dm.LateFrames = report.LateFrames - snap.LateFrames
 			dm.DecodeFailures = report.DecodeFailures - snap.DecodeFailures
 		} else {
@@ -215,7 +212,6 @@ func (s *session) updateMetrics(reporter string, dcOpen, pluginConnected bool, p
 			}
 			dm.RttUs = report.RttUs
 			dm.JitterUs = report.JitterUs
-			dm.DcDrops = report.DcDrops
 			dm.LateFrames = report.LateFrames
 			dm.DecodeFailures = report.DecodeFailures
 		}
@@ -937,9 +933,9 @@ function jitterClass(us){if(us==null)return'no-data';return us<=20000?'drop-ok':
 function countClass(n){return n>0?'drop-bad':'drop-ok'}
 function renderDirections(dirs,names){
   if(!dirs||Object.keys(dirs).length===0)return'<span class="no-data">No data yet</span>';
-  let h='<table><tr><th>Direction</th><th>Expected</th><th>Received</th><th>Dropped</th><th>Drop %</th><th>RTT</th><th>Jitter</th><th>DC Drops</th><th>Late</th><th>Decode Err</th></tr>';
+  let h='<table><tr><th>Direction</th><th>Expected</th><th>Received</th><th>Dropped</th><th>Drop %</th><th>RTT</th><th>Jitter</th><th>Late</th><th>Decode Err</th></tr>';
   for(const[dir,m]of Object.entries(dirs)){const p=m.frames_expected>0?(m.frames_dropped/m.frames_expected*100).toFixed(1):'\u2014';const c=dropClass(m.frames_expected,m.frames_dropped);
-    h+='<tr><td>'+esc(dirLabel(dir,names))+'</td><td>'+m.frames_expected+'</td><td>'+m.frames_received+'</td><td class="'+c+'">'+m.frames_dropped+'</td><td class="'+c+'">'+p+(m.frames_expected>0?'%':'')+'</td><td>'+fmtMs(m.rtt_us)+'</td><td class="'+jitterClass(m.jitter_us)+'">'+fmtMs(m.jitter_us)+'</td><td class="'+countClass(m.dc_drops||0)+'">'+(m.dc_drops||0)+'</td><td class="'+countClass(m.late_frames||0)+'">'+(m.late_frames||0)+'</td><td class="'+countClass(m.decode_failures||0)+'">'+(m.decode_failures||0)+'</td></tr>'}
+    h+='<tr><td>'+esc(dirLabel(dir,names))+'</td><td>'+m.frames_expected+'</td><td>'+m.frames_received+'</td><td class="'+c+'">'+m.frames_dropped+'</td><td class="'+c+'">'+p+(m.frames_expected>0?'%':'')+'</td><td>'+fmtMs(m.rtt_us)+'</td><td class="'+jitterClass(m.jitter_us)+'">'+fmtMs(m.jitter_us)+'</td><td class="'+countClass(m.late_frames||0)+'">'+(m.late_frames||0)+'</td><td class="'+countClass(m.decode_failures||0)+'">'+(m.decode_failures||0)+'</td></tr>'}
   return h+'</table>'}
 function renderSession(s){const pc=s.phase==='playing'?'playing':'joining';const names=s.peer_display_names;let h='<div class="session"><div class="session-header"><span class="room">'+esc(s.room)+'</span><span class="badge '+pc+'">'+esc(s.phase)+'</span><span class="meta">'+esc(s.duration)+'</span>';
   if(s.ended_at)h+='<span class="meta">ended '+esc(new Date(s.ended_at).toLocaleTimeString())+'</span>';

@@ -149,7 +149,6 @@ type PeerFrameReport struct {
 	FramesReceived uint64 `json:"frames_received"`
 	RTTUs          *int64 `json:"rtt_us,omitempty"`
 	JitterUs       *int64 `json:"jitter_us,omitempty"`
-	DCDrops        uint64 `json:"dc_drops"`
 	LateFrames     uint64 `json:"late_frames"`
 	DecodeFailures uint64 `json:"decode_failures"`
 }

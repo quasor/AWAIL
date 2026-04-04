@@ -587,7 +587,6 @@ async fn main() -> Result<()> {
                             frames_received: local_recv,
                             rtt_us: None,
                             jitter_us: None,
-                            dc_drops: 0,
                             late_frames: 0,
                             decode_failures: 0,
                         });

@@ -308,7 +308,7 @@ A **session** starts when the 2nd peer joins a room (≥2 peers) and ends when t
 1. **Joining** — from session start until all peers report `dc_open` and `plugin_connected`. Captures connection establishment and plugin attachment.
 2. **Playing** — steady-state audio flow after all peers are fully connected.
 
-> **Note:** Several field names retain their WebRTC-era naming: `dc_open` is always `true` once the WebSocket connects (so the joining→playing transition effectively depends only on `plugin_connected`), and `dc_drops` is always reported as 0 (WebSocket backpressure drops are not currently tracked per-peer). Both fields are retained in the protocol for backward compatibility.
+> **Note:** The field name `dc_open` retains its WebRTC-era naming: it is always `true` once the WebSocket connects (so the joining→playing transition effectively depends only on `plugin_connected`). The field is retained in the protocol for backward compatibility.
 
 ### Per-direction metrics
 
@@ -320,7 +320,6 @@ For each unique direction (e.g., `peer1→peer2`), the server tracks metrics ind
 **Network health metrics (per direction):**
 - `rtt_us` — median RTT to the peer (µs), from `ClockSync` Ping/Pong
 - `jitter_us` — mean absolute deviation from median RTT (µs), the key signal for intermittent issues
-- `dc_drops` — WebSocket backpressure drops (audio channel full)
 - `late_frames` — WAIF frames that arrived for already-passed intervals (detected in session.rs)
 - `decode_failures` — Opus decode failures reported by the recv plugin via `IPC_TAG_METRICS` (0x06)
 
