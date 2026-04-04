@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.1 (2026-04-04)
+
+### Fixes
+
+- disable autocomplete on room name input (#315)
+
 ## 2.2.0 (2026-04-04)
 
 ### Features
