@@ -174,6 +174,7 @@ type session struct {
 	Joining   map[string]*directionMetrics        `json:"joining"`
 	Playing   map[string]*directionMetrics        `json:"playing"`
 	peerState map[string]*peerStatus
+	peerDisplayNames   map[string]string // snapshotted at archive time
 	transitionSnapshot map[directionKey]peerFrameReport
 }
 
@@ -642,6 +643,16 @@ func (h *hub) leave(room, peerID string, c *conn) {
 			if s := r.activeSession; s != nil {
 				now := time.Now()
 				s.EndedAt = &now
+				s.peerDisplayNames = make(map[string]string)
+				for pid, rc := range r.connMap {
+					if rc.displayName != "" {
+						s.peerDisplayNames[pid] = rc.displayName
+					}
+				}
+				// Include the leaving peer (already removed from connMap).
+				if c.displayName != "" {
+					s.peerDisplayNames[peerID] = c.displayName
+				}
 				log.Printf("[metrics] session %s ended (peer %s left, %d remaining)", s.ID, peerID, peerCountAfter)
 				r.activeSession = nil
 				r.mu.Unlock()
@@ -930,7 +941,11 @@ func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
 		if roomFilter != "" && rn != roomFilter { continue }
 		for _, s := range sessions {
 			sj := sessionToJSON(s)
-			h.lookupDisplayNames(&sj)
+			if len(s.peerDisplayNames) > 0 {
+				sj.PeerDisplayNames = s.peerDisplayNames
+			} else {
+				h.lookupDisplayNames(&sj)
+			}
 			completed = append(completed, sj)
 		}
 	}
