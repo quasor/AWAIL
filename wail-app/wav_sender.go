@@ -115,6 +115,9 @@ func toStereo(samples []int16, srcChannels int) []int16 {
 // resample performs linear interpolation resampling of interleaved stereo samples.
 func resample(samples []int16, srcRate, dstRate int) []int16 {
 	srcFrames := len(samples) / 2
+	if srcFrames < 2 {
+		return samples
+	}
 	dstFrames := int(math.Round(float64(srcFrames) * float64(dstRate) / float64(srcRate)))
 	out := make([]int16, dstFrames*2)
 	ratio := float64(srcRate) / float64(dstRate)
@@ -190,6 +193,8 @@ func WavSenderTask(
 				if opusData, n, err := encodeFrame(enc, frame, opusBuf); err == nil {
 					sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
 						totalFrames-1, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
+				} else {
+					log.Printf("[wav-sender] Encode failed on boundary flush: %v", err)
 				}
 			}
 			currentIdx = boundary.Index
