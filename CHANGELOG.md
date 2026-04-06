@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.1 (2026-04-06)
+
+### Fixes
+
+- eliminate CPU spike at interval boundaries with pre-mix double buffer (#318)
+
 ## 2.3.0 (2026-04-05)
 
 ### Features
