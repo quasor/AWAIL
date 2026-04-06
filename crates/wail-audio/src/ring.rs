@@ -2788,4 +2788,193 @@ mod tests {
         assert_eq!(b, Some(10), "Boundary should report completed interval 10");
         assert_eq!(ring.current_interval, Some(11));
     }
+
+    // --- Test: Zero sample loss in perfect network ---
+
+    /// Validates that every sample fed for an interval is played back with no
+    /// truncation, duplication, or dropout. Simulates a perfect network where
+    /// all packets arrive before the interval boundary (N+1 playback).
+    ///
+    /// Uses a unique ramp signal so each sample is individually identifiable.
+    /// After crossfade, verifies exact sample match for the post-fade region
+    /// and correct sample count for the full interval.
+    #[test]
+    fn zero_sample_loss_single_peer() {
+        let mut ring = make_ring();
+        let buf_size = 512;
+        let mut output = vec![0.0f32; buf_size];
+
+        // Generate a full interval of identifiable audio: ascending ramp
+        // so every sample has a unique value. Stereo interleaved.
+        let interval_samples = (SR as f64 / 120.0 * 16.0) as usize * CH as usize;
+        let ramp: Vec<f32> = (0..interval_samples)
+            .map(|i| (i as f32 + 1.0) / interval_samples as f32)
+            .collect();
+
+        // Establish interval 0
+        ring.process_with_interval(&[], &mut output, Some(0));
+
+        // Feed the full interval as remote audio (simulating perfect delivery)
+        ring.feed_remote("peer-a".into(), 0, 0, ramp.clone());
+
+        // Advance to interval 1 — swaps interval 0 into playback
+        ring.process_with_interval(&[], &mut output, Some(1));
+
+        // Drain the entire playback slot
+        let mut played = Vec::new();
+        // First buffer was already read by the process call above
+        played.extend_from_slice(&output);
+
+        loop {
+            output.fill(0.0);
+            ring.process_with_interval(&[], &mut output, Some(1));
+            if ring.playback_remaining() == 0 && output.iter().all(|&s| s == 0.0) {
+                break;
+            }
+            played.extend_from_slice(&output);
+        }
+
+        // Trim trailing silence (from the last partial buffer fill)
+        while played.last() == Some(&0.0) {
+            played.pop();
+        }
+
+        // Total sample count must match what was fed
+        assert_eq!(
+            played.len(), interval_samples,
+            "Played {} samples but fed {} — sample loss or duplication detected",
+            played.len(), interval_samples,
+        );
+
+        // Post-crossfade region must be an exact match.
+        // The crossfade region (first XFADE_SAMPLES) blends with silence (new peer),
+        // so those samples are attenuated. Everything after must be bit-exact.
+        let post_fade = &played[XFADE_SAMPLES..];
+        let expected_post_fade = &ramp[XFADE_SAMPLES..];
+        for (i, (&got, &expected)) in post_fade.iter().zip(expected_post_fade).enumerate() {
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "Sample mismatch at post-fade index {i}: got {got}, expected {expected}",
+            );
+        }
+    }
+
+    /// Same as above but with multiple peers — verifies summed playback
+    /// preserves the total sample count and no peer's audio is dropped.
+    #[test]
+    fn zero_sample_loss_multi_peer() {
+        let mut ring = make_ring();
+        let buf_size = 512;
+        let mut output = vec![0.0f32; buf_size];
+
+        let interval_samples = (SR as f64 / 120.0 * 16.0) as usize * CH as usize;
+
+        // Peer A: constant 0.3, Peer B: constant 0.5 — summed should be 0.8
+        let audio_a = vec![0.3f32; interval_samples];
+        let audio_b = vec![0.5f32; interval_samples];
+
+        ring.process_with_interval(&[], &mut output, Some(0));
+
+        ring.feed_remote("peer-a".into(), 0, 0, audio_a);
+        ring.feed_remote("peer-b".into(), 0, 0, audio_b);
+
+        // Boundary swap
+        ring.process_with_interval(&[], &mut output, Some(1));
+
+        let mut played = Vec::new();
+        played.extend_from_slice(&output);
+
+        loop {
+            output.fill(0.0);
+            ring.process_with_interval(&[], &mut output, Some(1));
+            if ring.playback_remaining() == 0 && output.iter().all(|&s| s == 0.0) {
+                break;
+            }
+            played.extend_from_slice(&output);
+        }
+
+        while played.last() == Some(&0.0) {
+            played.pop();
+        }
+
+        assert_eq!(
+            played.len(), interval_samples,
+            "Played {} samples but fed {} — sample loss or duplication",
+            played.len(), interval_samples,
+        );
+
+        // Post-crossfade: every sample should be 0.3 + 0.5 = 0.8
+        for (i, &sample) in played[XFADE_SAMPLES..].iter().enumerate() {
+            assert!(
+                (sample - 0.8).abs() < 1e-5,
+                "Sample {i} post-fade: got {sample}, expected 0.8 — peer audio missing or duplicated",
+            );
+        }
+    }
+
+    /// Verifies zero sample loss across 3 consecutive interval boundaries.
+    /// Each interval gets a different constant value so we can verify the
+    /// correct interval's audio plays at the right time and no samples are
+    /// lost at boundaries.
+    #[test]
+    fn zero_sample_loss_across_boundaries() {
+        let mut ring = make_ring();
+        let buf_size = 512;
+        let mut output = vec![0.0f32; buf_size];
+
+        let interval_samples = (SR as f64 / 120.0 * 16.0) as usize * CH as usize;
+
+        // Three intervals with distinct amplitudes
+        let values: [f32; 3] = [0.25, 0.50, 0.75];
+
+        // Establish interval 0
+        ring.process_with_interval(&[], &mut output, Some(0));
+
+        // Feed all three intervals upfront (perfect network: all arrive early)
+        for (idx, &val) in values.iter().enumerate() {
+            ring.feed_remote("peer-a".into(), 0, idx as i64, vec![val; interval_samples]);
+        }
+
+        // Drive each interval individually: advance to N+1, drain playback,
+        // verify the played samples match interval N's audio exactly.
+        for (i, &val) in values.iter().enumerate() {
+            let next_interval = (i as i64) + 1;
+
+            let mut played = Vec::new();
+            // First call triggers the boundary and reads the first buffer
+            output.fill(0.0);
+            ring.process_with_interval(&[], &mut output, Some(next_interval));
+            played.extend_from_slice(&output);
+
+            // Drain remaining playback for this interval
+            while ring.playback_remaining() > 0 {
+                output.fill(0.0);
+                ring.process_with_interval(&[], &mut output, Some(next_interval));
+                played.extend_from_slice(&output);
+            }
+
+            // Trim trailing silence from the last partial buffer
+            while played.last() == Some(&0.0) {
+                played.pop();
+            }
+
+            assert_eq!(
+                played.len(), interval_samples,
+                "Interval {i}: played {} samples, expected {} — sample loss at boundary",
+                played.len(), interval_samples,
+            );
+
+            // Post-crossfade: verify content matches the expected value
+            let mismatches: Vec<_> = played[XFADE_SAMPLES..].iter().enumerate()
+                .filter(|(_, &s)| (s - val).abs() > 1e-4)
+                .take(5)
+                .collect();
+
+            assert!(
+                mismatches.is_empty(),
+                "Interval {i}: expected {val} post-fade, got mismatches: {:?}",
+                mismatches,
+            );
+        }
+    }
 }
