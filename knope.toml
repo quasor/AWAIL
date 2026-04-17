@@ -18,10 +18,6 @@ command = "cargo update --workspace"
 
 [[workflows.steps]]
 type = "Command"
-command = "sh -c 'V=$(grep \"^version = \" Cargo.toml | head -1 | sed \"s/version = \\\"//;s/\\\"//\"); sed -i \"s/const appVersion = \\\".*\\\"/const appVersion = \\\"$V\\\"/\" wail-app/version.go'"
-
-[[workflows.steps]]
-type = "Command"
 command = "git switch -c release"
 
 [[workflows.steps]]

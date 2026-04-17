@@ -1,5 +1,5 @@
 package main
 
-// appVersion is kept in sync with Cargo.toml workspace version by knope
-// (see knope.toml). Do not edit manually.
-const appVersion = "2.3.1"
+// appVersion is injected at build time via -ldflags from Cargo.toml workspace
+// version. Unreleased/local builds show the default.
+var appVersion = "0.0.0-dev"
