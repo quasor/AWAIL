@@ -149,20 +149,49 @@ jobs:
             cmake \
             g++
 
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build plugin
         run: cargo xtask bundle-plugin
 
-      - name: Build Go app (linkstub)
-        run: go build -tags linkstub -o /dev/null .
+      - name: Clone abletonlink-go
+        run: git clone --recursive https://github.com/DatanoiseTV/abletonlink-go.git "$RUNNER_TEMP/abletonlink-go"
+
+      - name: Build wail desktop app
+        run: |
+          sed -i "s|^replace github.com/DatanoiseTV/abletonlink-go.*|replace github.com/DatanoiseTV/abletonlink-go => $RUNNER_TEMP/abletonlink-go|" go.mod
+          go build -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail" .
         working-directory: wail-app
 
-      - name: Collect artifacts
+      - name: Stage release artifacts
         run: |
-          mkdir -p dist
-          cp target/bundled/wail-plugin-send.clap dist/
-          cp -r target/bundled/wail-plugin-send.vst3 dist/
-          cp target/bundled/wail-plugin-recv.clap dist/
-          cp -r target/bundled/wail-plugin-recv.vst3 dist/
+          mkdir -p dist/lib
+          cp target/bundled/wail-plugin-send.clap dist/lib/
+          cp -r target/bundled/wail-plugin-send.vst3 dist/lib/
+          cp target/bundled/wail-plugin-recv.clap dist/lib/
+          cp -r target/bundled/wail-plugin-recv.vst3 dist/lib/
+          cat > dist/README.txt <<'EOF'
+          WAIL — WAN Audio Interchange for Link
+
+          Runtime dependencies (Debian/Ubuntu):
+            sudo apt install libwebkit2gtk-4.1-0 libopus0
+
+          Run:
+            ./bin/wail
+
+          On first launch the CLAP/VST3 plugins in lib/ are copied to
+          ~/.clap/ and ~/.vst3/ so your DAW can find them.
+
+          Documentation: https://github.com/MostDistant/WAIL
+          EOF
 
       - uses: actions/upload-artifact@v7
         with:
@@ -194,11 +223,17 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Zip platform artifacts
+      - name: Package platform artifacts
         run: |
           VERSION="${{ steps.tag.outputs.version }}"
-          cd wail-release-windows && zip -r ../wail-windows-x64-${VERSION}.zip . && cd ..
-          cd wail-release-linux && zip -r ../wail-linux-x64-${VERSION}.zip . && cd ..
+          # Windows: zip, with a top-level wail-<version>/ directory inside.
+          mv wail-release-windows "wail-${VERSION}"
+          zip -r "wail-windows-x64-${VERSION}.zip" "wail-${VERSION}"
+          mv "wail-${VERSION}" wail-release-windows
+          # Linux: tarball, same top-level directory layout.
+          mv wail-release-linux "wail-${VERSION}"
+          tar -czf "wail-linux-x64-${VERSION}.tar.gz" "wail-${VERSION}"
+          mv "wail-${VERSION}" wail-release-linux
 
       - name: Find individual installers
         id: files
@@ -210,7 +245,7 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             wail-windows-x64-${{ steps.tag.outputs.version }}.zip
-            wail-linux-x64-${{ steps.tag.outputs.version }}.zip
+            wail-linux-x64-${{ steps.tag.outputs.version }}.tar.gz
             ${{ steps.files.outputs.src_tarball }}
 
       # Update the Homebrew tap formula with the new version and SHA256.
