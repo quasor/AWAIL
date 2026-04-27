@@ -150,6 +150,8 @@ cargo xtask test -- -p wail-core          # core library tests only
 cargo xtask test -- -p wail-audio         # audio tests (codec, ring buffer, wire format)
 ```
 
+**Skip tests for docs-only changes.** If a PR only modifies `.md` files (or other non-code docs), do not run `cargo xtask test` — it builds plugins and is slow. Tests are not needed when no code paths change.
+
 ## Code Conventions
 
 - Async with tokio, channels for cross-task communication
