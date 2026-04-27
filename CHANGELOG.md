@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.0 (2026-04-27)
+
+### Features
+
+- track packet loss via wire-level sequence numbers; remove Debug tab (#323)
+
 ## 2.3.2 (2026-04-17)
 
 ### Fixes
